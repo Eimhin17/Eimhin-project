@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>DebsMatch - Password Reset</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #e91e63, #9c27b0);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .container {
+            background: white;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            max-width: 400px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .logo {
+            font-size: 28px;
+            font-weight: bold;
+            color: #e91e63;
+            margin-bottom: 20px;
+        }
+        .title {
+            font-size: 24px;
+            font-weight: 600;
+            color: #2c3e50;
+            margin-bottom: 20px;
+        }
+        .message {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+        .button {
+            display: inline-block;
+            background: linear-gradient(135deg, #e91e63, #9c27b0);
+            color: white;
+            padding: 15px 30px;
+            text-decoration: none;
+            border-radius: 25px;
+            font-weight: 600;
+            font-size: 16px;
+            margin: 10px;
+        }
+        .button:hover {
+            transform: translateY(-2px);
+        }
+        .fallback {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #999;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="logo">💃 DebsMatch</div>
+        <h1 class="title">Password Reset</h1>
+        <p class="message">
+            Click the button below to open the DebsMatch app and reset your password.
+        </p>
+        
+        <a href="debsmatch://auth/reset-password" class="button">
+            Open DebsMatch App
+        </a>
+        
+        <div class="fallback">
+            <p>If the app doesn't open automatically:</p>
+            <p>1. Make sure DebsMatch is installed on your device</p>
+            <p>2. Try opening the app manually</p>
+        </div>
+    </div>
+
+    <script>
+        // Auto-redirect after 3 seconds
+        setTimeout(function() {
+            window.location.href = 'debsmatch://auth/reset-password';
+        }, 3000);
+    </script>
+</body>
+</html>

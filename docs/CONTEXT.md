@@ -94,6 +94,7 @@ Select from:
 - Short term but open to long term
 - Long term only
 - Long term but open to short term
+- Friends
 
 ### Step 12 – Profile Photos
 - Choose 4 to 6 photos

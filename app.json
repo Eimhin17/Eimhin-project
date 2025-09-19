@@ -1,4 +1,30 @@
 {
-  "name": "DebsMatch",
-  "slug": "DebsMatch"
+  "expo": {
+    "name": "DebsMatch",
+    "slug": "debsmatch",
+    "scheme": "debsmatch",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#1a1a1a"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.anonymous.debsmatch"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#1a1a1a"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font"
+    ]
+  }
 }

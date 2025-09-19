@@ -1,0 +1,14 @@
+{
+  "name": "debsmatch-scripts",
+  "version": "1.0.0",
+  "description": "Scripts for testing DebsMatch functionality",
+  "main": "test-auth-signin.js",
+  "scripts": {
+    "test:auth": "node test-auth-signin.js",
+    "test:signin": "node test-auth-signin.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0",
+    "dotenv": "^16.0.0"
+  }
+}
