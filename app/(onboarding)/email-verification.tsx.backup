@@ -1,0 +1,540 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { 
+  View, 
+  Text, 
+  StyleSheet, 
+  SafeAreaView, 
+  TouchableOpacity, 
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  Animated,
+  Alert,
+  Easing
+} from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
+import { LinearGradient } from 'expo-linear-gradient';
+import { useOnboarding } from '../../OnboardingContext';
+import { SPACING, BORDER_RADIUS } from '../../utils/constants';
+import { GradientConfigs } from '../../utils/colors';
+import {
+  attachProgressHaptics,
+  playLightHaptic,
+  playOnboardingProgressHaptic,
+} from '../../utils/haptics';
+import { Input, ProgressBar, BackButton } from '../../components/ui';
+import { Fonts } from '../../utils/fonts';
+import { EmailService } from '../../services/email';
+import { Ionicons } from '@expo/vector-icons';
+
+export default function EmailVerificationScreen() {
+  const [email, setEmail] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [isProgressAnimating, setIsProgressAnimating] = useState(false);
+  const { updateData } = useOnboarding();
+
+  // Animation values
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const slideAnim = useRef(new Animated.Value(30)).current;
+  const contentOpacity = useRef(new Animated.Value(0)).current;
+  const formOpacity = useRef(new Animated.Value(0)).current;
+  const buttonOpacity = useRef(new Animated.Value(0)).current;
+
+  // Button press animations
+  const buttonScale = useRef(new Animated.Value(1)).current;
+  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const progressFillAnim = useRef(new Animated.Value(0)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
+
+  // Scroll refs
+  const scrollViewRef = useRef<ScrollView>(null);
+  const formRef = useRef<View>(null);
+
+  useFocusEffect(
+    React.useCallback(() => {
+      progressFillAnim.stopAnimation();
+      progressFillAnim.setValue(0);
+      setIsProgressAnimating(false);
+      return undefined;
+    }, [progressFillAnim])
+  );
+
+  useEffect(() => {
+    // Staggered entrance animations
+    Animated.sequence([
+      Animated.parallel([
+        Animated.timing(fadeAnim, {
+          toValue: 1,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+        Animated.timing(slideAnim, {
+          toValue: 0,
+          duration: 600,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.timing(contentOpacity, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }),
+      Animated.timing(formOpacity, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }),
+      Animated.timing(buttonOpacity, {
+        toValue: 1,
+        duration: 400,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, []);
+  // Button press animations
+  const animateButtonPress = (animValue: Animated.Value, callback?: () => void) => {
+    Animated.sequence([
+      Animated.timing(animValue, {
+        toValue: 0.95,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(animValue, {
+        toValue: 1,
+        duration: 150,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      if (callback) callback();
+    });
+  };
+
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const animateStepByStepProgress = () => {
+    progressFillAnim.setValue(0);
+    setIsProgressAnimating(true);
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
+    
+    // Animate from current step progress to next step progress
+    Animated.timing(progressFillAnim, {
+      toValue: 1,
+      duration: 1000,
+      useNativeDriver: false,
+    }).start(() => {
+      detachHaptics();
+      setIsProgressAnimating(false);
+      playOnboardingProgressHaptic(3, 5);
+      // Navigate after smooth animation
+      setTimeout(() => {
+        // Store email in onboarding data
+        updateData({ schoolEmail: email });
+        router.push('/(onboarding)/email-code');
+      }, 200);
+    });
+  };
+
+  const handleSendCode = async () => {
+    if (!email.trim()) return;
+
+    console.log('🚀 handleSendCode called with email:', email.trim());
+    console.log('📧 Attempting to send verification email...');
+
+    try {
+      setIsLoading(true);
+      console.log('⏳ Loading state set to true');
+      
+      // Actually send the verification email
+      console.log('📤 Calling EmailService.sendVerificationCode...');
+      const result = await EmailService.sendVerificationCode(email.trim());
+      
+      console.log('📨 Email service result:', result);
+      
+      if (result.success) {
+        console.log('✅ Email sent successfully!');
+        triggerButtonSweep();
+        // Start step-by-step progress animation
+        animateStepByStepProgress();
+      } else {
+        console.error('❌ Failed to send email:', result.error);
+        Alert.alert(
+          'Email Error',
+          result.error || 'Failed to send verification email. Please try again.',
+          [{ text: 'OK' }]
+        );
+      }
+    } catch (error) {
+      console.error('❌ Email service error:', error);
+      Alert.alert(
+        'Email Error',
+        'An unexpected error occurred. Please try again.',
+        [{ text: 'OK' }]
+      );
+    } finally {
+      console.log('🏁 Setting loading state to false');
+      setIsLoading(false);
+    }
+  };
+
+  const handleBackPress = () => {
+    playLightHaptic();
+    animateButtonPress(backButtonScale, () => {
+      router.back();
+    });
+  };
+
+  const handleInputFocus = () => {
+    // Scroll to show the form card including the information text
+    setTimeout(() => {
+      formRef.current?.measureLayout(
+        scrollViewRef.current as any,
+        (x, y) => {
+          scrollViewRef.current?.scrollTo({
+            y: Math.max(0, y - 50),
+            animated: true,
+          });
+        },
+        () => {
+          scrollViewRef.current?.scrollTo({
+            y: 150,
+            animated: true,
+          });
+        }
+      );
+    }, 100);
+  };
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <KeyboardAvoidingView
+        style={styles.keyboardAvoidingView}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
+        <ScrollView
+          ref={scrollViewRef}
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          automaticallyAdjustKeyboardInsets={true}
+        >
+          {/* Header */}
+          <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
+            <View style={styles.backButtonContainer}>
+              <BackButton
+                onPress={handleBackPress}
+                animatedValue={backButtonScale}
+                color="#c3b1e1"
+                size={72}
+                iconSize={28}
+              />
+            </View>
+            
+            <View style={styles.headerCenter}>
+              <Text style={styles.headerTitle}>Email Verification</Text>
+              <View style={styles.progressContainer}>
+                <ProgressBar
+                  currentStep={3}
+                  totalSteps={5}
+                  showStepNumbers={false}
+                  variant="gradient"
+                  size="small"
+                  fill={isProgressAnimating ? progressFillAnim : undefined}
+                  isAnimating={isProgressAnimating}
+                  useMoti
+                  gradientColors={GradientConfigs.phaseOneProgress.colors}
+                  style={styles.progressBar}
+                />
+              </View>
+            </View>
+            
+            <View style={styles.headerRight} />
+          </Animated.View>
+
+          {/* Main Content */}
+          <Animated.View
+            style={[
+              styles.content,
+              {
+                opacity: contentOpacity,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <Text style={styles.title}>Enter your school email</Text>
+            <Text style={styles.subtitle}>
+              We will send you a code
+            </Text>
+
+            {/* Email Input Form */}
+            <Animated.View ref={formRef} style={[styles.formContainer, { opacity: formOpacity }]}>
+              <LinearGradient
+                colors={['#F8F4FF', '#FFFFFF']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.formCard}
+              >
+                <Input
+                  label="School Email Address"
+                  placeholder="your.name@schoolname.ie"
+                  value={email}
+                  onChangeText={setEmail}
+                  onFocus={handleInputFocus}
+                  keyboardType="email-address"
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  style={styles.emailInput}
+                />
+                
+                <View style={styles.infoContainer}>
+                  <Ionicons name="information-circle" size={16} color="#FF4F81" />
+                  <Text style={styles.infoText}>
+                    This helps us verify you're a student at a registered Irish secondary school
+                  </Text>
+                </View>
+              </LinearGradient>
+            </Animated.View>
+
+          </Animated.View>
+        </ScrollView>
+
+        {/* Continue Button Footer */}
+        <View style={styles.footerContainer}>
+          <Animated.View style={[styles.buttonContainer, { opacity: buttonOpacity }]}>
+            <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+              <TouchableOpacity
+                style={[
+                  styles.continueButton,
+                  (!email.trim() || isLoading) && styles.disabledButton
+                ]}
+                onPress={handleSendCode}
+                activeOpacity={0.8}
+                disabled={!email.trim() || isLoading}
+              >
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.buttonHighlight,
+                    {
+                      opacity: buttonHighlightAnim.interpolate({
+                        inputRange: [0, 0.2, 0.8, 1],
+                        outputRange: [0, 0.45, 0.25, 0],
+                      }),
+                      transform: [
+                        {
+                          translateX: buttonHighlightAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [-220, 220],
+                          }),
+                        },
+                      ],
+                    }
+                  ]}
+                >
+                  <LinearGradient
+                    colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.buttonHighlightGradient}
+                  />
+                </Animated.View>
+                <Text style={[
+                  styles.continueButtonText,
+                  (!email.trim() || isLoading) && styles.disabledButtonText
+                ]}>
+                  {isLoading ? 'Sending...' : 'Send Verification Code'}
+                </Text>
+              </TouchableOpacity>
+            </Animated.View>
+          </Animated.View>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: '#FFFFFF', // Primary white background from design system
+  },
+  keyboardAvoidingView: {
+    flex: 1,
+  },
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.lg, // Using design system token
+    paddingVertical: SPACING.md,   // Using design system token
+    borderBottomWidth: 1,
+    borderBottomColor: '#E5E7EB', // Light border color from design system
+    backgroundColor: '#FFFFFF', // Primary white background from design system
+    position: 'relative', // Enable absolute positioning for center content
+  },
+  backButtonContainer: {
+    width: 72, // Even bigger container
+    marginLeft: -SPACING.md, // Move further left using design system token
+    zIndex: 1, // Ensure it's above other elements
+  },
+  headerCenter: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 0, // Behind the back button
+  },
+  headerTitle: {
+    fontSize: 22, // Slightly larger for main title
+    fontWeight: '600', // SemiBold weight for prominence
+    color: '#1B1B3A', // Primary text color from design system
+    marginBottom: SPACING.sm,
+    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+  },
+  progressContainer: {
+    width: '100%',
+    maxWidth: 200,
+    alignItems: 'center',
+    marginTop: SPACING.xs,
+    paddingHorizontal: SPACING.sm,
+  },
+  progressBar: {
+    marginTop: 0,
+    width: '100%',
+  },
+  headerRight: {
+    width: 72, // Same size as back button for balance
+    zIndex: 1,
+  },
+  content: {
+    flex: 1,
+    paddingHorizontal: SPACING.lg, // Using design system token
+    paddingTop: SPACING.lg,        // Using design system token
+    paddingBottom: SPACING.lg,     // Add bottom padding for content
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  title: {
+    fontSize: 28, // Large title size
+    fontWeight: '700', // Bold weight from design system
+    color: '#1B1B3A', // Primary text color from design system
+    textAlign: 'center',
+    marginBottom: SPACING.sm, // Using design system token
+    lineHeight: 36,
+    letterSpacing: -0.5,
+    fontFamily: Fonts.bold, // Poppins Bold from design system
+  },
+  subtitle: {
+    fontSize: 16, // Body text size from design system
+    color: '#6B7280', // Secondary text color from design system
+    textAlign: 'center',
+    marginBottom: SPACING['2xl'], // Using design system token
+    lineHeight: 24,
+    paddingHorizontal: SPACING.md, // Using design system token
+    fontFamily: Fonts.regular, // Inter Regular from design system
+  },
+  formContainer: {
+    marginBottom: 0, // No margin since button is at bottom
+  },
+  formCard: {
+    borderRadius: BORDER_RADIUS.md, // Using design system token
+    padding: SPACING.lg, // Using design system token
+    overflow: 'hidden', // For gradient background
+  },
+  emailInput: {
+    marginBottom: 0, // Remove margin since wrapper handles it
+  },
+  infoContainer: {
+    marginTop: SPACING.md, // Using design system token
+    paddingHorizontal: SPACING.md, // Using design system token
+    paddingVertical: SPACING.sm, // Using design system token
+    backgroundColor: '#FFE5F0', // Light pink background
+    borderRadius: BORDER_RADIUS.md, // Using design system token
+    borderWidth: 1,
+    borderColor: '#FFB6C1', // Light pink border
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.sm, // Using design system token
+  },
+  infoText: {
+    fontSize: 14, // Small text size from design system
+    color: '#6B7280', // Secondary text color from design system
+    textAlign: 'left',
+    lineHeight: 20,
+    flex: 1,
+    fontFamily: Fonts.regular, // Inter Regular from design system
+  },
+  footerContainer: {
+    backgroundColor: '#FFFFFF', // White background
+    borderTopWidth: 1,
+    borderTopColor: '#E5E7EB', // Light border color
+    paddingTop: SPACING.lg, // Consistent with design system grid
+    paddingBottom: SPACING.md, // Consistent bottom padding
+  },
+  buttonContainer: {
+    paddingHorizontal: SPACING.xl, // Using design system token (32px)
+    paddingBottom: SPACING.sm, // Minimal bottom padding
+  },
+  continueButton: {
+    backgroundColor: '#FF4F81', // Primary pink from design system
+    paddingVertical: 18, // From design system primary button spec
+    paddingHorizontal: SPACING.xl, // Using design system token (32px)
+    borderRadius: 16, // From design system primary button spec
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 56, // From design system primary button spec
+    overflow: 'hidden',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#FF4F81',
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.3,
+        shadowRadius: 12,
+      },
+      android: {
+        elevation: 8,
+        shadowColor: '#FF4F81',
+      },
+    }),
+  },
+  continueButtonText: {
+    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+    fontWeight: '600', // SemiBold weight from design system
+    fontSize: 18, // From design system primary button spec
+    color: '#FFFFFF', // White text from design system
+    letterSpacing: 0.5, // From design system primary button spec
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
+  },
+  disabledButton: {
+    opacity: 0.5, // Reduced opacity for disabled state
+  },
+  disabledButtonText: {
+    opacity: 0.7, // Slightly more visible text when disabled
+  },
+});

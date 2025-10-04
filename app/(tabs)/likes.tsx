@@ -1,68 +1,177 @@
-import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, FlatList, ActivityIndicator, Animated, Alert, Dimensions } from 'react-native';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, FlatList, ActivityIndicator, Animated, Alert, Dimensions, Easing } from 'react-native';
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import { LikesService, LikeWithProfile } from '../../services/likes';
 import { MatchingService } from '../../services/matching';
 import { useUser } from '../../contexts/UserContext';
+import { useMatchNotification } from '../../contexts/MatchNotificationContext';
 import { CircularProfilePicture } from '../../components/CircularProfilePicture';
 import { useMatchCreation } from '../../hooks/useMatchCreation';
 import { useProfilePreloader } from '../../hooks/useProfilePreloader';
+import { useTabPreloader } from '../../hooks/useTabPreloader';
+import { tabPreloader } from '../../services/tabPreloader';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
+import { playMatchCelebrationHaptic, playJoyfulButtonPressHaptic, playLightHaptic } from '../../utils/haptics';
 
 export default function LikesScreen() {
   const { userProfile } = useUser();
   const { checkAndCreateMatch } = useMatchCreation();
-  
+  const matchNotificationContext = useMatchNotification();
+
   // Preload first profile for instant swiping screen
-  useProfilePreloader({ 
-    shouldPreload: true, 
-    pageName: 'likes' 
+  useProfilePreloader({
+    shouldPreload: true,
+    pageName: 'likes'
   });
-  
+
+  // Preload adjacent tab data
+  useTabPreloader({ currentTab: 'likes' });
+
   // Debug: Check if function exists
   console.log('🔍 LikesScreen: checkAndCreateMatch function:', typeof checkAndCreateMatch);
   const [likes, setLikes] = useState<LikeWithProfile[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false); // Changed to false for instant UI
   const [refreshing, setRefreshing] = useState(false);
+  const [initialLoadComplete, setInitialLoadComplete] = useState(false);
   const [showMatchNotification, setShowMatchNotification] = useState(false);
   const [matchedUser, setMatchedUser] = useState<any>(null);
   const [matchId, setMatchId] = useState<string | null>(null);
 
+  // Match animation values - use context's matchOverlayOpacity for footer sync
+  const matchOverlayOpacity = matchNotificationContext.matchOverlayOpacity;
+  const matchScale = useRef(new Animated.Value(0.3)).current;
+  const matchProfile1Scale = useRef(new Animated.Value(0.5)).current;
+  const matchProfile2Scale = useRef(new Animated.Value(0.5)).current;
+  const matchGlowPulse = useRef(new Animated.Value(1)).current;
+
   console.log('🎯 LikesScreen rendered - userProfile:', userProfile?.id, 'likes count:', likes.length);
 
+  // Sync match notification state with context for footer overlay
   useEffect(() => {
-    loadLikes();
-  }, [userProfile]);
+    matchNotificationContext.setShowMatchNotification(showMatchNotification);
+  }, [showMatchNotification]);
 
-  const loadLikes = async () => {
+  const loadLikes = useCallback(async (skipPreloaded = false) => {
     if (!userProfile) {
       console.log('❌ No user profile available for loading likes');
       return;
     }
-    
+
     console.log('🔄 Loading likes for user:', userProfile.id);
-    setLoading(true);
+
+    // Check for preloaded data first (unless explicitly skipping)
+    if (!skipPreloaded && !initialLoadComplete) {
+      const preloadedLikes = tabPreloader.getPreloadedLikes();
+      if (preloadedLikes && preloadedLikes.length > 0) {
+        console.log('⚡ Using preloaded likes data');
+        setLikes(preloadedLikes);
+        setInitialLoadComplete(true);
+        // Still load fresh data in background
+        setTimeout(() => loadLikes(true), 100);
+        return;
+      }
+    }
+
     try {
       const likesData = await LikesService.getLikesReceived(userProfile.id);
       console.log('✅ Loaded likes:', likesData.length, 'likes');
       console.log('📋 Likes data:', likesData);
       setLikes(likesData);
+      setInitialLoadComplete(true);
     } catch (error) {
       console.error('❌ Error loading likes:', error);
-    } finally {
-      setLoading(false);
+      setInitialLoadComplete(true);
     }
-  };
+  }, [userProfile, initialLoadComplete]);
+
+  useEffect(() => {
+    loadLikes();
+  }, [loadLikes]);
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!userProfile || !initialLoadComplete) {
+        return;
+      }
+
+      console.log('🔄 Likes screen focused, refreshing likes in background...');
+      loadLikes();
+    }, [userProfile, loadLikes, initialLoadComplete])
+  );
 
   const handleRefresh = async () => {
     setRefreshing(true);
     await loadLikes();
     setRefreshing(false);
+  };
+
+  // Animate match notification in
+  const animateMatchNotificationIn = () => {
+    // Play mega haptic celebration
+    playMatchCelebrationHaptic();
+
+    // Reset all animation values
+    matchOverlayOpacity.setValue(0);
+    matchScale.setValue(0.3);
+    matchProfile1Scale.setValue(0.5);
+    matchProfile2Scale.setValue(0.5);
+    matchGlowPulse.setValue(1);
+
+    // Sequence of delightful animations
+    Animated.sequence([
+      // 1. Fade in overlay with explosive entrance and profile pictures together
+      Animated.parallel([
+        Animated.timing(matchOverlayOpacity, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.spring(matchScale, {
+          toValue: 1,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }),
+        // Bounce profile pictures in immediately
+        Animated.stagger(150, [
+          Animated.spring(matchProfile1Scale, {
+            toValue: 1,
+            tension: 100,
+            friction: 8,
+            useNativeDriver: true,
+          }),
+          Animated.spring(matchProfile2Scale, {
+            toValue: 1,
+            tension: 100,
+            friction: 8,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    ]).start();
+
+    // Continuous glow pulse animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(matchGlowPulse, {
+          toValue: 1.3,
+          duration: 1000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(matchGlowPulse, {
+          toValue: 1,
+          duration: 1000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    ).start();
   };
 
   const formatTimeAgo = (dateString: string) => {
@@ -116,6 +225,7 @@ export default function LikesScreen() {
             setMatchedUser(matchedProfile.liker_profile);
             setMatchId(matchResult.matchId || null);
             setShowMatchNotification(true);
+            animateMatchNotificationIn();
           }
           
           // Remove the matched user from the likes list
@@ -125,6 +235,7 @@ export default function LikesScreen() {
         } else {
           console.log('❌ No match created from likes screen');
           // Don't remove from likes list if no match was created
+          // Nothing further
         }
       } catch (error) {
         console.error('❌ Error in match creation:', error);
@@ -148,8 +259,14 @@ export default function LikesScreen() {
 
     // Record the swipe in the database (same as swiping screen)
     await MatchingService.recordSwipe(userProfile.id, likedUserId, 'left');
-    
-    // Remove from likes list without creating a like
+
+    try {
+      await LikesService.removeLike(likedUserId, userProfile.id);
+      console.log('✅ Removed like record from database for user:', likedUserId);
+    } catch (error) {
+      console.error('❌ Failed to remove like record for user:', likedUserId, error);
+    }
+
     console.log('🔄 Removing user from likes list...');
     setLikes(prevLikes => prevLikes.filter(like => like.liker_id !== likedUserId));
     console.log('✅ User removed from likes list');
@@ -157,16 +274,19 @@ export default function LikesScreen() {
 
   const renderLikeItem = ({ item }: { item: LikeWithProfile }) => {
     const profile = item.liker_profile;
-    
+    const profileInitial = profile.first_name?.charAt(0)?.toUpperCase() || profile.username?.charAt(0)?.toUpperCase() || '?';
+
     return (
       <View style={styles.likeItem}>
         <LinearGradient
-          colors={['#FFFFFF', '#FFF0F5']}
+          colors={['#FFF0F5', '#F8F4FF']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
           style={styles.likeItemGradient}
         >
           <TouchableOpacity
             style={styles.likeItemContent}
-            onPress={() => router.push(`/profile/${profile.id}`)}
+            onPress={() => router.push(`/profile/${profile.id}?source=likes`)}
             activeOpacity={0.7}
           >
             <View style={styles.avatarContainer}>
@@ -174,7 +294,7 @@ export default function LikesScreen() {
                 userId={profile.id}
                 size={60}
                 fallbackIcon={
-                  <Ionicons name="person" size={24} color="#c3b1e1" />
+                  <Text style={styles.profileInitial}>{profileInitial}</Text>
                 }
               />
             </View>
@@ -194,6 +314,7 @@ export default function LikesScreen() {
   };
 
   return (
+    <>
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
@@ -203,60 +324,61 @@ export default function LikesScreen() {
             <Text style={styles.headerTitlePurple}>kes</Text>
           </View>
         </View>
+
+        {/* Header Overlay for Match Notification */}
+        {showMatchNotification && (
+          <Animated.View style={[
+            styles.headerOverlay,
+            { opacity: matchOverlayOpacity }
+          ]} />
+        )}
       </View>
 
-      {/* Likes List */}
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#FF4F81" />
-          <Text style={styles.loadingText}>Loading likes...</Text>
-        </View>
-      ) : (
-        <FlatList
-          data={likes}
-          renderItem={renderLikeItem}
-          keyExtractor={(item) => item.id}
-          showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.likesList}
-          refreshing={refreshing}
-          onRefresh={handleRefresh}
-          ListEmptyComponent={
-            <View style={styles.emptyState}>
-              <Ionicons name="heart-outline" size={64} color="#c3b1e1" />
-              <Text style={styles.emptyTitle}>No likes yet</Text>
-              <Text style={styles.emptySubtitle}>
-                Start swiping to get more likes on your profile!
-              </Text>
-            </View>
-          }
-        />
-      )}
+      {/* Main content area - Likes list or idle image */}
+      <View style={styles.mainContent}>
+        {likes.length === 0 ? (
+          <Image
+            source={require('../../Images/likes idle state.png')}
+            style={styles.idleImage}
+            contentFit="contain"
+          />
+        ) : (
+          <FlatList
+            data={likes}
+            renderItem={renderLikeItem}
+            keyExtractor={(item) => item.id}
+            showsVerticalScrollIndicator={false}
+            contentContainerStyle={styles.likesList}
+            refreshing={refreshing}
+            onRefresh={handleRefresh}
+          />
+        )}
+      </View>
 
-      {/* Match Notification Modal */}
+      {/* Match Notification - Premium style */}
       {showMatchNotification && matchedUser && (
-        <Animated.View style={styles.matchNotification}>
-          <View style={styles.matchNotificationContent}>
-            {/* Match Icon with Animation */}
-            <View style={styles.matchIconContainer}>
-              <View style={styles.matchIconInner}>
-                <FontAwesome5 name="heart" size={45} color="#FF4F81" />
-              </View>
-              <View style={styles.matchIconGlow} />
-            </View>
-            
-            {/* Match Title with Sparkle */}
+        <Animated.View style={[
+          styles.matchNotification,
+          { opacity: matchOverlayOpacity }
+        ]}>
+          <Animated.View style={[
+            styles.matchNotificationContent,
+            { transform: [{ scale: matchScale }] }
+          ]}>
+            {/* Match Title */}
             <View style={styles.matchTitleContainer}>
-              <FontAwesome5 name="sparkles" size={20} color="#FFD700" style={styles.sparkleIcon} />
               <Text style={styles.matchNotificationTitle}>It's a Match!</Text>
-              <FontAwesome5 name="sparkles" size={20} color="#FFD700" style={styles.sparkleIcon} />
             </View>
-            
+
             {/* Match Description with Profile Pictures */}
             <View style={styles.matchProfilesContainer}>
-              <View style={styles.matchProfileContainer}>
+              <Animated.View style={[
+                styles.matchProfileContainer,
+                { transform: [{ scale: matchProfile1Scale }] }
+              ]}>
                 {userProfile?.photos && userProfile.photos.length > 0 ? (
-                  <Image 
-                    source={{ uri: userProfile.photos[0] }} 
+                  <Image
+                    source={{ uri: userProfile.photos[0] }}
                     style={styles.matchProfileImage}
                     contentFit="cover"
                   />
@@ -266,16 +388,22 @@ export default function LikesScreen() {
                   </View>
                 )}
                 <Text style={styles.matchProfileName}>{userProfile?.firstName}</Text>
-              </View>
-              
-              <View style={styles.matchHeartContainer}>
+              </Animated.View>
+
+              <Animated.View style={[
+                styles.matchHeartContainer,
+                { transform: [{ scale: matchGlowPulse }] }
+              ]}>
                 <FontAwesome5 name="heart" size={24} color="#FF4F81" />
-              </View>
-              
-              <View style={styles.matchProfileContainer}>
+              </Animated.View>
+
+              <Animated.View style={[
+                styles.matchProfileContainer,
+                { transform: [{ scale: matchProfile2Scale }] }
+              ]}>
                 {matchedUser.photos && matchedUser.photos.length > 0 ? (
-                  <Image 
-                    source={{ uri: matchedUser.photos[0] }} 
+                  <Image
+                    source={{ uri: matchedUser.photos[0] }}
                     style={styles.matchProfileImage}
                     contentFit="cover"
                   />
@@ -285,18 +413,29 @@ export default function LikesScreen() {
                   </View>
                 )}
                 <Text style={styles.matchProfileName}>{matchedUser.first_name}</Text>
-              </View>
+              </Animated.View>
             </View>
-            
+
             <Text style={styles.matchNotificationText}>
               You both liked each other!
             </Text>
-            
+
             {/* Match Buttons */}
             <View style={styles.matchNotificationButtons}>
-              <TouchableOpacity 
+              <TouchableOpacity
+                style={styles.matchKeepSwipingButton}
+                onPress={() => {
+                  playLightHaptic();
+                  setShowMatchNotification(false);
+                }}
+              >
+                <Text style={styles.matchKeepSwipingButtonText} numberOfLines={1}>Ok</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
                 style={styles.matchChatButton}
                 onPress={() => {
+                  playJoyfulButtonPressHaptic();
                   setShowMatchNotification(false);
                   // Navigate to chat using match ID
                   if (matchId) {
@@ -304,20 +443,14 @@ export default function LikesScreen() {
                   }
                 }}
               >
-                <Text style={styles.matchChatButtonText}>Start Chat</Text>
-              </TouchableOpacity>
-              
-              <TouchableOpacity 
-                style={styles.matchKeepSwipingButton}
-                onPress={() => setShowMatchNotification(false)}
-              >
-                <Text style={styles.matchKeepSwipingButtonText}>Keep Swiping</Text>
+                <Text style={styles.matchChatButtonText}>Chat</Text>
               </TouchableOpacity>
             </View>
-          </View>
+          </Animated.View>
         </Animated.View>
       )}
     </SafeAreaView>
+    </>
   );
 }
 
@@ -328,12 +461,15 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#FFFFFF',
   },
+  mainContent: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
   header: {
     backgroundColor: '#FFFFFF',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: 0,
   },
   headerCenter: {
     alignItems: 'center',
@@ -368,7 +504,9 @@ const styles = StyleSheet.create({
     color: '#6B7280',
   },
   likesList: {
-    padding: SPACING.lg,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.md,
+    paddingBottom: SPACING.lg,
     backgroundColor: '#FFFFFF',
   },
   likeItem: {
@@ -378,18 +516,19 @@ const styles = StyleSheet.create({
     marginBottom: SPACING.md,
     shadowColor: '#FF4F81',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    elevation: 3,
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 2,
     borderWidth: 1,
-    borderColor: '#F3F4F6',
+    borderColor: 'rgba(255, 79, 129, 0.35)',
     overflow: 'hidden',
   },
   likeItemGradient: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    padding: SPACING.md,
+    paddingVertical: SPACING.lg,
+    paddingHorizontal: SPACING.lg,
     borderRadius: BORDER_RADIUS.lg,
   },
   likeItemContent: {
@@ -468,6 +607,11 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     paddingHorizontal: SPACING.lg,
   },
+  idleImage: {
+    width: '100%',
+    height: '100%',
+    transform: [{ translateY: 2 }],
+  },
   // Match Notification Styles
   matchNotification: {
     position: 'absolute',
@@ -475,26 +619,38 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.8)',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 100,
+    backdropFilter: 'blur(20px)',
   },
   matchNotificationContent: {
     backgroundColor: '#FFFFFF',
-    borderRadius: BORDER_RADIUS['2xl'],
-    padding: SPACING['2xl'],
+    borderRadius: 30,
+    padding: 32,
     alignItems: 'center',
-    width: '90%',
-    maxWidth: 400,
+    width: width * 0.78,
     shadowColor: '#FF4F81',
     shadowOffset: {
       width: 0,
-      height: 8,
+      height: 20,
     },
-    shadowOpacity: 0.3,
-    shadowRadius: 16,
-    elevation: 12,
+    shadowOpacity: 0.5,
+    shadowRadius: 30,
+    elevation: 20,
+    borderWidth: 3,
+    borderColor: 'rgba(255, 79, 129, 0.2)',
+  },
+  headerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    zIndex: 10,
+    pointerEvents: 'none',
   },
   matchIconContainer: {
     width: 100,
@@ -534,25 +690,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: SPACING.md,
-  },
-  sparkleIcon: {
-    marginHorizontal: SPACING.md,
+    marginBottom: 16,
   },
   matchNotificationTitle: {
-    fontSize: 28,
-    fontWeight: '700',
+    fontSize: 32,
+    fontWeight: '800',
     color: '#1B1B3A',
-    fontFamily: Fonts.bold,
-    marginBottom: SPACING.sm,
+    marginBottom: 12,
     textAlign: 'center',
   },
   matchNotificationText: {
-    fontSize: 16,
-    color: '#6B7280',
-    fontFamily: Fonts.regular,
+    fontSize: 18,
+    color: '#6C4AB6',
     textAlign: 'center',
-    marginBottom: SPACING['2xl'],
+    marginBottom: 32,
     lineHeight: 24,
   },
   matchProfilesContainer: {
@@ -585,9 +736,8 @@ const styles = StyleSheet.create({
   matchProfileName: {
     fontSize: 14,
     fontWeight: '600',
-    color: '#1B1B3A',
-    fontFamily: Fonts.semiBold,
-    marginTop: SPACING.sm,
+    color: '#FF4F81',
+    marginTop: 8,
     textAlign: 'center',
   },
   matchHeartContainer: {
@@ -599,56 +749,62 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     width: '100%',
-    gap: SPACING.md,
+    gap: 16,
   },
   matchChatButton: {
     backgroundColor: '#FF4F81',
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.xl,
-    borderRadius: BORDER_RADIUS.lg,
+    paddingVertical: 18,
+    paddingHorizontal: 32,
+    borderRadius: 18,
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#FF4F81',
     shadowOffset: {
       width: 0,
-      height: 4,
+      height: 6,
     },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 6,
+    shadowOpacity: 0.4,
+    shadowRadius: 12,
+    elevation: 8,
   },
   matchChatButtonText: {
     color: '#FFFFFF',
     fontSize: 16,
-    fontWeight: '600',
-    fontFamily: Fonts.semiBold,
+    fontWeight: '800',
     textAlign: 'center',
   },
   matchKeepSwipingButton: {
-    backgroundColor: '#F8F4FF',
-    paddingVertical: SPACING.lg,
-    paddingHorizontal: SPACING.xl,
-    borderRadius: BORDER_RADIUS.lg,
+    backgroundColor: '#F8F9FA',
+    paddingVertical: 22,
+    paddingHorizontal: 32,
+    borderRadius: 18,
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#c3b1e1',
-    shadowColor: '#c3b1e1',
+    borderWidth: 2.5,
+    borderColor: '#6C4AB6',
+    shadowColor: '#6C4AB6',
     shadowOffset: {
       width: 0,
-      height: 2,
+      height: 3,
     },
-    shadowOpacity: 0.2,
-    shadowRadius: 4,
-    elevation: 3,
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
   },
   matchKeepSwipingButtonText: {
-    color: '#c3b1e1',
-    fontSize: 16,
-    fontWeight: '600',
+    color: '#6C4AB6',
+    fontSize: 14,
+    fontWeight: '800',
+    textAlign: 'center',
+    lineHeight: 16,
     fontFamily: Fonts.semiBold,
     textAlign: 'center',
+  },
+  profileInitial: {
+    fontFamily: Fonts.bold,
+    fontSize: 24,
+    color: '#FF4F81',
   },
 });

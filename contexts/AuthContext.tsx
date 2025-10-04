@@ -32,19 +32,32 @@ export const AuthProvider: React.FC<AuthProviderProps> = ({ children }) => {
   // Check for existing session on app start
   useEffect(() => {
     console.log('🔐 Checking for existing auth session...');
-    
+
     const checkSession = async () => {
       try {
         const { user: currentUser, error } = await AuthService.getCurrentUser();
-        
+
         if (currentUser && !error) {
           console.log('✅ Found existing session for user:', currentUser.email);
           setUser(currentUser);
+        } else if (error) {
+          // Handle specific auth errors gracefully
+          if (error.includes('Auth session missing') || error.includes('session_missing')) {
+            console.log('ℹ️ No auth session found (user not signed in yet)');
+          } else {
+            console.log('ℹ️ No existing session:', error);
+          }
         } else {
           console.log('ℹ️ No existing session found');
         }
-      } catch (error) {
-        console.error('❌ Error checking session:', error);
+      } catch (error: any) {
+        // Catch and handle auth session errors gracefully
+        const errorMessage = error?.message || String(error);
+        if (errorMessage.includes('Auth session missing') || errorMessage.includes('session_missing')) {
+          console.log('ℹ️ No auth session found (user not signed in yet)');
+        } else {
+          console.error('❌ Error checking session:', error);
+        }
       } finally {
         setLoading(false);
       }

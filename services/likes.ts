@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { PhotoUploadService } from './photoUpload';
+import { sendPushNotification } from './notifications';
 
 export interface LikeData {
   id: string;
@@ -37,11 +38,50 @@ export class LikesService {
         .single();
 
       if (error) {
+        // Allow duplicate likes: if constraint violation, fetch existing like and return it
+        if ((error as any).code === '23505') {
+          console.warn('Duplicate like detected; returning existing like');
+          const { data: existing, error: selectError } = await supabase
+            .from('likes')
+            .select('*')
+            .eq('liker_id', likerId)
+            .eq('liked_user_id', likedUserId)
+            .single();
+
+          if (selectError) {
+            console.error('Error fetching existing like after duplicate:', selectError);
+            return null;
+          }
+          return existing as LikeData;
+        }
         console.error('Error creating like:', error);
         return null;
       }
 
       console.log('Like created successfully:', data);
+
+      // Send push notification to the liked user
+      try {
+        // Get liker's profile for notification
+        const { data: likerProfile } = await supabase
+          .from('profiles')
+          .select('first_name')
+          .eq('id', likerId)
+          .single();
+
+        if (likerProfile) {
+          await sendPushNotification(
+            likedUserId,
+            '💖 New Like!',
+            `${likerProfile.first_name} liked you!`,
+            { type: 'new_like', liker_id: likerId }
+          );
+        }
+      } catch (notifError) {
+        console.error('Error sending like notification:', notifError);
+        // Don't fail the like creation if notification fails
+      }
+
       return data;
     } catch (error) {
       console.error('Error creating like:', error);
@@ -107,19 +147,21 @@ export class LikesService {
       // Get the filtered liker IDs
       const filteredLikerIds = filteredLikes.map(like => like.liker_id);
 
-      // Fetch profiles for the filtered likers
+      // Fetch profiles for the filtered likers (only completed profiles)
       const { data: profilesData, error: profilesError } = await supabase
         .from('profiles')
         .select(`
-          id, 
-          first_name, 
+          id,
+          first_name,
           username,
           date_of_birth,
           bio,
           county,
           schools (school_name)
         `)
-        .in('id', filteredLikerIds);
+        .in('id', filteredLikerIds)
+        .eq('profile_completed', true)
+        .eq('status', 'active');
 
       if (profilesError) {
         console.error('Error fetching profiles:', profilesError);
@@ -269,19 +311,21 @@ export class LikesService {
       // Get the filtered liked user IDs
       const likedUserIds = filteredLikes.map(like => like.liked_user_id);
 
-      // Fetch profiles for the liked users
+      // Fetch profiles for the liked users (only completed profiles)
       const { data: profilesData, error: profilesError } = await supabase
         .from('profiles')
         .select(`
-          id, 
-          first_name, 
+          id,
+          first_name,
           username,
           date_of_birth,
           bio,
           county,
           schools (school_name)
         `)
-        .in('id', likedUserIds);
+        .in('id', likedUserIds)
+        .eq('profile_completed', true)
+        .eq('status', 'active');
 
       if (profilesError) {
         console.error('Error fetching profiles:', profilesError);

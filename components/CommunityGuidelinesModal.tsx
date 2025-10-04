@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,12 +8,14 @@ import {
   TouchableOpacity,
   SafeAreaView,
   Dimensions,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import { BackButton } from './ui';
+import { playLightHaptic } from '../utils/haptics';
 
 interface CommunityGuidelinesModalProps {
   visible: boolean;
@@ -23,6 +25,46 @@ interface CommunityGuidelinesModalProps {
 const { height: screenHeight } = Dimensions.get('window');
 
 export default function CommunityGuidelinesModal({ visible, onClose }: CommunityGuidelinesModalProps) {
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    if (visible) {
+      // Animate back button on modal open
+      Animated.parallel([
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [visible]);
+
+  const handleBackPress = () => {
+    // Match onboarding: light haptic + fade/scale out then close
+    playLightHaptic();
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      onClose();
+    });
+  };
+
   return (
     <Modal
       visible={visible}
@@ -33,9 +75,18 @@ export default function CommunityGuidelinesModal({ visible, onClose }: Community
       <SafeAreaView style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <BackButton onPress={onClose} />
-          <View style={styles.headerCenter}>
-            <Text style={styles.title}>Comm Guidelines</Text>
+          <View style={styles.backButtonWrapper}>
+            <Animated.View style={{ opacity: backButtonOpacity, transform: [{ scale: backButtonScale }] }}>
+              <BackButton
+                onPress={handleBackPress}
+                color="#c3b1e1"
+                size={72}
+                iconSize={28}
+              />
+            </Animated.View>
+          </View>
+          <View style={styles.headerCenter} pointerEvents="none">
+            <Text style={styles.title}>Com Guidelines</Text>
           </View>
           <View style={styles.headerRight} />
         </View>
@@ -364,10 +415,13 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FAFAFA',
     minHeight: 60,
+  },
+  backButtonWrapper: {
+    width: 72,
+    marginLeft: -SPACING.lg,
+    zIndex: 2,
   },
   headerCenter: {
     position: 'absolute',

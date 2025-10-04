@@ -1,23 +1,35 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
   FlatList,
   StatusBar,
   KeyboardAvoidingView,
   Platform,
-  Animated
+  Animated,
+  Easing,
+  TextInput,
+  SafeAreaView,
+  Alert,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { useOnboarding } from '../../OnboardingContext';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
 import { supabase } from '../../lib/supabase';
+import { ProgressiveOnboardingService } from '../../services/progressiveOnboarding';
 import { SCHOOLS, SPACING, BORDER_RADIUS } from '../../utils/constants';
-import { Colors, Gradients } from '../../utils/colors';
-import { Button, Input, Card, ProgressBar, BackButton } from '../../components/ui';
+import { Colors, GradientConfigs } from '../../utils/colors';
+import {
+  attachProgressHaptics,
+  playCardSelectionHaptic,
+  playLightHaptic,
+  playOnboardingProgressHaptic,
+} from '../../utils/haptics';
+import { smartSearch } from '../../utils/smartSearch';
+import { Card, ProgressBar, BackButton } from '../../components/ui';
 import { Fonts } from '../../utils/fonts';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -36,11 +48,25 @@ export default function SchoolSelectionScreen() {
   const [isProgressAnimating, setIsProgressAnimating] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isSearchFocused, setIsSearchFocused] = useState(false);
+  const searchFillAnim = useRef(new Animated.Value(0)).current;
   const { updateData } = useOnboarding();
 
-  // Button press animations
-  const backButtonScale = useRef(new Animated.Value(1)).current;
+  // Button press animations - fade + scale combo
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
   const progressFillAnim = useRef(new Animated.Value(0)).current;
+  const listEntryAnimations = useRef<Record<string, Animated.Value>>({});
+  const cardPulseAnimations = useRef<Record<string, Animated.Value>>({});
+  const pingAnimations = useRef<Record<string, Animated.Value>>({});
+
+  useFocusEffect(
+    React.useCallback(() => {
+      progressFillAnim.stopAnimation();
+      progressFillAnim.setValue(0);
+      setIsProgressAnimating(false);
+      return undefined;
+    }, [progressFillAnim])
+  );
 
   // Fetch schools from database with fallback to static array
   useEffect(() => {
@@ -128,6 +154,56 @@ export default function SchoolSelectionScreen() {
     fetchSchools();
   }, []);
 
+  const getEntryAnimation = (id: string) => {
+    if (!listEntryAnimations.current[id]) {
+      listEntryAnimations.current[id] = new Animated.Value(0);
+    }
+    return listEntryAnimations.current[id];
+  };
+
+  const getPulseAnimation = (id: string) => {
+    if (!cardPulseAnimations.current[id]) {
+      cardPulseAnimations.current[id] = new Animated.Value(0);
+    }
+    return cardPulseAnimations.current[id];
+  };
+
+  const getPingAnimation = (id: string) => {
+    if (!pingAnimations.current[id]) {
+      pingAnimations.current[id] = new Animated.Value(0);
+    }
+    return pingAnimations.current[id];
+  };
+
+  useEffect(() => {
+    // Back button fade + scale combo animation on mount
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 1,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 1,
+        duration: 250,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    filteredSchools.forEach((school, index) => {
+      const anim = getEntryAnimation(school.id);
+      anim.stopAnimation();
+      anim.setValue(0);
+      Animated.timing(anim, {
+        toValue: 1,
+        duration: 450,
+        delay: index * 40,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }).start();
+    });
+  }, [filteredSchools]);
+
   // Helper function to extract county from school name
   const getCountyFromSchoolName = (schoolName: string): string => {
     const name = schoolName.toLowerCase();
@@ -167,12 +243,21 @@ export default function SchoolSelectionScreen() {
     if (searchQuery.trim() === '') {
       setFilteredSchools(allSchools);
     } else {
-      const filtered = allSchools.filter(school => 
-        school.name.toLowerCase().includes(searchQuery.toLowerCase())
-      );
+      const filtered = smartSearch(allSchools, searchQuery, ['name']);
       setFilteredSchools(filtered);
     }
   }, [searchQuery, allSchools]);
+
+  // Animate search fill based on input length
+  useEffect(() => {
+    const MAX_SEARCH_LENGTH = 30;
+    const target = Math.min(searchQuery.length / MAX_SEARCH_LENGTH, 1);
+    Animated.timing(searchFillAnim, {
+      toValue: target,
+      duration: 200,
+      useNativeDriver: false,
+    }).start();
+  }, [searchQuery, searchFillAnim]);
 
   // Button press animations
   const animateButtonPress = (animValue: Animated.Value, callback?: () => void) => {
@@ -193,14 +278,18 @@ export default function SchoolSelectionScreen() {
   };
 
   const animateStepByStepProgress = () => {
+    progressFillAnim.setValue(0);
     setIsProgressAnimating(true);
-    
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
     // Smooth forward progress animation
     Animated.timing(progressFillAnim, {
       toValue: 1,
       duration: 1000,
       useNativeDriver: false,
     }).start(() => {
+      detachHaptics();
+      setIsProgressAnimating(false);
+      playOnboardingProgressHaptic(1, 5);
       // Navigate after smooth animation
       setTimeout(() => {
         console.log('✅ School should be saved now, navigating to email verification...');
@@ -212,74 +301,173 @@ export default function SchoolSelectionScreen() {
   const handleSchoolSelect = async (school: School) => {
     setSelectedSchool(school.name);
     console.log('🏫 School selected:', school.name, 'County:', school.county);
-    
-    // Update onboarding data with school name
-    updateData({ school: school.name });
-    console.log('💾 School saved:', school.name);
-    
-    // Continue with onboarding immediately (no delay needed)
-    console.log('✅ School selection complete, navigating to email verification...');
-    animateStepByStepProgress();
+
+    playCardSelectionHaptic();
+
+    const pulseAnim = getPulseAnimation(school.id);
+    const pingAnim = getPingAnimation(school.id);
+    pulseAnim.stopAnimation();
+    pulseAnim.setValue(0);
+    pingAnim.stopAnimation();
+    pingAnim.setValue(0);
+    Animated.parallel([
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 200,
+          easing: Easing.out(Easing.quad),
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 0,
+          duration: 220,
+          easing: Easing.inOut(Easing.quad),
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.timing(pingAnim, {
+        toValue: 1,
+        duration: 520,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(async () => {
+      pingAnim.setValue(0);
+
+      // Note: School selection happens BEFORE email verification,
+      // so there's no authenticated user yet. Just save to context.
+      // This will be saved to database later after account creation.
+      updateData({ school: school.name });
+      console.log('💾 School saved to context (will save to DB after email verification):', school.name);
+
+      // Continue with onboarding
+      console.log('✅ School selection complete, navigating to blocked schools...');
+      animateStepByStepProgress();
+    });
   };
 
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.SCHOOL_SELECTION);
     });
   };
 
   const renderSchool = ({ item, index }: { item: School; index: number }) => {
     const isSelected = selectedSchool === item.name;
     const isEven = index % 2 === 0;
-    
+
+    const entryAnim = getEntryAnimation(item.id);
+    const pulseAnim = getPulseAnimation(item.id);
+    const pingAnim = getPingAnimation(item.id);
+
+    const scale = pulseAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [1, 1.05],
+    });
+
+    const shadowOpacity = pulseAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.08, 0.28],
+    });
+
+    const pingScale = pingAnim.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.6, 1.4],
+    });
+
+    const pingOpacity = pingAnim.interpolate({
+      inputRange: [0, 0.3, 1],
+      outputRange: [0, 0.35, 0],
+    });
+
     return (
-      <View style={styles.schoolItemContainer}>
-        <Card
-          variant={isSelected ? 'gradient' : 'default'}
-          padding="medium"
-          onPress={() => handleSchoolSelect(item)}
-          style={[
-            styles.schoolItem,
-            isSelected ? styles.selectedSchoolItem : {},
-            isEven ? styles.evenCard : styles.oddCard
-          ].reduce((acc, style) => ({ ...acc, ...style }), {})}
-        >
-          <View style={styles.schoolItemContent}>
-            <View style={styles.schoolIconContainer}>
-              <Ionicons 
-                name="school" 
-                size={24} 
-                color="#FF4F81" 
-              />
-            </View>
-            <View style={styles.schoolTextContainer}>
-              <Text style={[
-                styles.schoolName,
-                isSelected && styles.selectedSchoolName
-              ]}>
-                {item.name}
-              </Text>
+      <Animated.View
+        style={[
+          styles.schoolItemContainer,
+          {
+            opacity: entryAnim,
+            transform: [
+              {
+                translateY: entryAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [36, 0],
+                }),
+              },
+            ],
+          },
+        ]}
+      >
+        <Animated.View style={{ transform: [{ scale }] }}>
+          <Card
+            variant={isSelected ? 'gradient' : 'default'}
+            padding="medium"
+            onPress={() => handleSchoolSelect(item)}
+            style={[
+              styles.schoolItem,
+              isSelected ? styles.selectedSchoolItem : {},
+              isEven ? styles.evenCard : styles.oddCard,
+              styles.schoolItemShadow,
+              isSelected && styles.schoolItemSelectedShadow,
+            ]}
+          >
+            <View style={styles.schoolItemContent}>
+              <View style={styles.schoolIconContainer}>
+                <Ionicons
+                  name="school"
+                  size={24}
+                  color={isSelected ? '#FFFFFF' : '#FF4F81'}
+                />
+              </View>
+              <View style={styles.schoolTextContainer}>
+                <Text
+                  style={[
+                    styles.schoolName,
+                    isSelected && styles.selectedSchoolName,
+                  ]}
+                >
+                  {item.name}
+                </Text>
+                {isSelected && <Text style={styles.selectedIndicator}>Selected</Text>}
+              </View>
               {isSelected && (
-                <Text style={styles.selectedIndicator}>Selected</Text>
+                <View style={styles.checkmarkContainer}>
+                  <Ionicons name="checkmark" size={18} color="#FFFFFF" />
+                </View>
               )}
             </View>
             {isSelected && (
-              <View style={styles.checkmarkContainer}>
-                <Ionicons 
-                  name="checkmark" 
-                  size={18} 
-                  color="#FFFFFF" 
-                />
-              </View>
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.pingRing,
+                  {
+                    opacity: pingOpacity,
+                    transform: [{ scale: pingScale }],
+                  },
+                ]}
+              />
             )}
-          </View>
-        </Card>
-      </View>
+          </Card>
+        </Animated.View>
+      </Animated.View>
     );
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.container}>
       <StatusBar barStyle="dark-content" backgroundColor={Colors.background.primary} />
       
       <KeyboardAvoidingView 
@@ -287,60 +475,62 @@ export default function SchoolSelectionScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
-        {/* Header */}
-        <View style={styles.header}>
-          <View style={styles.backButtonContainer}>
-            <BackButton
-              onPress={handleBackPress} 
-              animatedValue={backButtonScale}
-              color="#c3b1e1"
-              size={72}
-              iconSize={28}
-            />
-          </View>
-          
-          <View style={styles.headerCenter}>
-            <Text style={styles.headerTitle}>Select Your School</Text>
-                    <View style={styles.progressContainer}>
-                          <ProgressBar 
-                currentStep={1} 
-                totalSteps={17} 
+        <SafeAreaView>
+          <View style={styles.topRow}>
+            <View style={styles.backButtonWrapper}>
+              <Animated.View style={{
+                opacity: backButtonOpacity,
+                transform: [{ scale: backButtonScale }],
+              }}>
+                <BackButton
+                  onPress={handleBackPress}
+                  color="#c3b1e1"
+                  size={72}
+                  iconSize={28}
+                />
+              </Animated.View>
+            </View>
+            <View style={styles.progressWrapper}>
+              <ProgressBar
+                currentStep={1}
+                totalSteps={5}
                 showStepNumbers={false}
                 variant="gradient"
-                size="small"
+                size="medium"
                 fill={isProgressAnimating ? progressFillAnim : undefined}
                 isAnimating={isProgressAnimating}
-                        style={styles.progressBar}
+                useMoti
+                gradientColors={GradientConfigs.phaseOneProgress.colors}
+                style={styles.progressBar}
               />
-                    </View>
+            </View>
+            {/* Empty spacer to match blocked-schools layout */}
+            <View style={{ width: 48, height: 48 }} />
           </View>
-          
-          <View style={styles.headerRight} />
-        </View>
+        </SafeAreaView>
 
         {/* Main Content */}
         <View style={styles.content}>
           {/* Search Input */}
           <View style={styles.searchContainer}>
-            <LinearGradient
-              colors={isSearchFocused ? ['#FFE5F0', '#FFF0F5'] : ['#F8F4FF', '#FFFFFF']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={[
-                styles.searchInputWrapper,
-                isSearchFocused && styles.searchInputFocused
-              ]}
-            >
-            <Input
-              placeholder="Search for your school..."
-              value={searchQuery}
-              onChangeText={setSearchQuery}
+            <View style={styles.searchLineWrapper}>
+              <TextInput
+                style={styles.searchLineInput}
+                placeholder="Search for your school..."
+                placeholderTextColor="#9CA3AF"
+                value={searchQuery}
+                onChangeText={setSearchQuery}
                 onFocus={() => setIsSearchFocused(true)}
                 onBlur={() => setIsSearchFocused(false)}
-                leftIcon={<Ionicons name="search" size={18} color={isSearchFocused ? "#FF4F81" : "#9CA3AF"} />}
-              style={styles.searchInput}
-            />
-            </LinearGradient>
+                selectionColor="#c3b1e1"
+              />
+              <View
+                style={[
+                  styles.searchLineTrack,
+                  (isSearchFocused || searchQuery.length > 0) && styles.searchLineTrackActive,
+                ]}
+              />
+            </View>
             
             <Text style={styles.searchResults}>
               {isLoading ? 'Loading schools...' : `Found ${filteredSchools.length} schools`}
@@ -358,6 +548,9 @@ export default function SchoolSelectionScreen() {
               renderItem={renderSchool}
               keyExtractor={(item) => item.id}
               showsVerticalScrollIndicator={false}
+              contentInsetAdjustmentBehavior="never"
+              automaticallyAdjustContentInsets={false}
+              scrollIndicatorInsets={{ top: 0, bottom: 0, left: 0, right: 0 }}
               contentContainerStyle={styles.schoolsList}
               style={styles.schoolsContainer}
               initialNumToRender={10}
@@ -376,7 +569,7 @@ export default function SchoolSelectionScreen() {
           )}
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -388,79 +581,62 @@ const styles = StyleSheet.create({
   keyboardAvoidingView: {
     flex: 1,
   },
-  header: {
+  topRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingVertical: SPACING.md,   // Using design system token
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB', // Light border color from design system
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    position: 'relative', // Enable absolute positioning for center content
+    justifyContent: 'space-between',
+    paddingTop: SPACING.lg,
+    paddingHorizontal: SPACING.lg,
+    marginBottom: SPACING['2xl'],
   },
-  backButtonContainer: {
-    width: 72, // Even bigger container
-    marginLeft: -SPACING.md, // Move further left using design system token
-    zIndex: 1, // Ensure it's above other elements
+  backButtonWrapper: {
+    marginLeft: -SPACING.lg,
   },
-  headerCenter: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  progressWrapper: {
+    flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 0, // Behind the back button
-  },
-  headerRight: {
-    width: 72, // Same width as back button to balance the layout
-    zIndex: 1, // Ensure it's above other elements
-  },
-  headerTitle: {
-    fontSize: 22, // Slightly larger for main title
-    fontWeight: '600', // SemiBold weight for prominence
-    color: '#1B1B3A', // Primary text color from design system
-    marginBottom: 0,
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-  },
-  progressContainer: {
-    width: '100%',
-    maxWidth: 200,
-    alignItems: 'center',
-    marginTop: SPACING.xs,
-    paddingHorizontal: SPACING.sm,
   },
   progressBar: {
-    marginTop: 0,
-    width: '100%',
+    width: 160,
+  },
+  topRowSpacer: {
+    width: 48,
+    height: 72,
   },
   content: {
     flex: 1,
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingTop: SPACING.lg,        // Using design system token
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.md,
     // Grid-based layout structure
     display: 'flex',
     flexDirection: 'column',
   },
   searchSection: {
-    marginBottom: SPACING.lg, // Using design system token
+    marginBottom: SPACING.lg,
   },
   searchContainer: {
-    marginBottom: SPACING.lg, // Using design system token
+    marginTop: -SPACING.md,
+    marginBottom: SPACING.lg,
   },
-  searchInputWrapper: {
-    borderRadius: BORDER_RADIUS.md, // Using design system token
-    overflow: 'hidden', // For gradient background
-    marginBottom: SPACING.sm, // Using design system token
+  searchLineWrapper: {
+    paddingBottom: SPACING.sm,
+    marginBottom: SPACING.sm,
   },
-  searchInputFocused: {
-    shadowColor: '#FF4F81', // Pink shadow when focused
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 8, // Android shadow
+  searchLineInput: {
+    fontSize: 20,
+    fontFamily: Fonts.semiBold,
+    color: '#1B1B3A',
+    paddingVertical: 8,
   },
-  searchInput: {
-    marginBottom: 0, // Remove margin since wrapper handles it
+  searchLineTrack: {
+    height: 2,
+    backgroundColor: '#E5E7EB',
+    width: '100%',
+    borderRadius: 1,
+    overflow: 'hidden',
+  },
+  searchLineTrackActive: {
+    backgroundColor: '#c3b1e1',
   },
   searchResults: {
     fontSize: 14, // Small text size from design system
@@ -474,19 +650,47 @@ const styles = StyleSheet.create({
   },
   schoolsContainer: {
     flex: 1,
+    ...Platform.select({
+      ios: { marginBottom: -34 },
+      android: {},
+    }),
   },
   schoolsList: {
-    paddingBottom: SPACING.lg, // Using design system token
+    paddingBottom: 0,
   },
   schoolItemContainer: {
     marginBottom: SPACING.md, // Using design system token
+    overflow: 'visible',
   },
   schoolItem: {
     borderWidth: 2, // Thicker border for gradient effect
     borderColor: '#E5E7EB', // Light border color from design system
+    backgroundColor: '#FFFFFF',
+    overflow: 'visible',
+  },
+  schoolItemShadow: {
+    shadowColor: '#FF4F81',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  schoolItemSelectedShadow: {
+    shadowColor: '#FF4F81',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 6,
   },
   selectedSchoolItem: {
     borderColor: '#FF4F81', // Primary pink from design system
+  },
+  pingRing: {
+    ...StyleSheet.absoluteFillObject,
+    margin: -12,
+    borderRadius: 28,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 79, 129, 0.5)',
   },
   evenCard: {
     backgroundColor: '#FFF0F5', // Very light pink background

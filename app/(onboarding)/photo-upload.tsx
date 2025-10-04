@@ -1,32 +1,46 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
-  ScrollView, 
-  KeyboardAvoidingView, 
-  Platform, 
-  Animated, 
-  Alert 
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
+  ScrollView,
+  KeyboardAvoidingView,
+  Platform,
+  Animated,
+  Alert,
+  Easing,
+  Dimensions
 } from 'react-native';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
-import { Colors, Gradients } from '../../utils/colors';
-import { Button, ProgressBar, BackButton } from '../../components/ui';
+import { Gradients, GradientConfigs } from '../../utils/colors';
+import { ProgressBar, BackButton } from '../../components/ui';
 import { Fonts } from '../../utils/fonts';
-import { useOnboarding } from '../../OnboardingContext';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
 import { OnboardingService } from '../../services/onboarding';
+import { ProgressiveOnboardingService } from '../../services/progressiveOnboarding';
 import { Ionicons } from '@expo/vector-icons';
+import { attachProgressHaptics, playLightHaptic, playOnboardingProgressHaptic } from '../../utils/haptics';
+
+const { width: screenWidth } = Dimensions.get('window');
+
 
 export default function PhotoUploadScreen() {
   const [photos, setPhotos] = useState<string[]>([]);
+  const [uploadedPhotoUrls, setUploadedPhotoUrls] = useState<string[]>([]);
   const [isProgressAnimating, setIsProgressAnimating] = useState(false);
-  const { updateData } = useOnboarding();
+  const [flippingPhotoIndex, setFlippingPhotoIndex] = useState<number | null>(null);
+  const [uploadingPhotoIndex, setUploadingPhotoIndex] = useState<number | null>(null);
+  const { updateData, setCurrentStep } = useOnboarding();
+  const TOTAL_STEPS = 5;
+  const CURRENT_STEP = 5;
+  const PREVIOUS_STEP = 4;
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -36,12 +50,31 @@ export default function PhotoUploadScreen() {
 
   // Button press animations
   const buttonScale = useRef(new Animated.Value(1)).current;
-  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
   const progressFillAnim = useRef(new Animated.Value(0)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
+
+  // Photo flip animations - one for each possible photo slot
+  const photoFlipAnims = useRef(
+    Array.from({ length: 6 }, () => new Animated.Value(0))
+  ).current;
+
+
+  // Progress bar completion animations
+  const progressGlowAnim = useRef(new Animated.Value(0)).current;
+  const progressPulseAnim = useRef(new Animated.Value(1)).current;
+  const hasNavigatedRef = useRef(false);
+
+  // Register this step for resume functionality
+  useEffect(() => {
+    setCurrentStep(ONBOARDING_STEPS.PHOTO_UPLOAD);
+  }, []);
+
 
   useEffect(() => {
-    // Staggered entrance animations
-    Animated.sequence([
+    // Staggered entrance animations including back button fade + scale
+    const animation = Animated.sequence([
       Animated.parallel([
         Animated.timing(fadeAnim, {
           toValue: 1,
@@ -51,6 +84,17 @@ export default function PhotoUploadScreen() {
         Animated.timing(slideAnim, {
           toValue: 0,
           duration: 600,
+          useNativeDriver: true,
+        }),
+        // Back button fade + scale combo animation
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]),
@@ -64,7 +108,42 @@ export default function PhotoUploadScreen() {
         duration: 400,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+
+    animation.start();
+
+    // Cleanup function to stop animations on unmount
+    return () => {
+      animation.stop();
+      // Reset all animation values to prevent memory leaks
+      fadeAnim.setValue(0);
+      slideAnim.setValue(30);
+      contentOpacity.setValue(0);
+      formOpacity.setValue(0);
+      backButtonOpacity.setValue(0.3);
+      backButtonScale.setValue(0.8);
+    };
+  }, []);
+
+  // Cleanup effect for memory management
+  useEffect(() => {
+    return () => {
+      // Stop all animations to prevent memory leaks
+      fadeAnim.stopAnimation();
+      slideAnim.stopAnimation();
+      contentOpacity.stopAnimation();
+      formOpacity.stopAnimation();
+      buttonScale.stopAnimation();
+      backButtonScale.stopAnimation();
+      backButtonOpacity.stopAnimation();
+      progressFillAnim.stopAnimation();
+      buttonHighlightAnim.stopAnimation();
+      progressGlowAnim.stopAnimation();
+      progressPulseAnim.stopAnimation();
+
+      photoFlipAnims.forEach(anim => anim.stopAnimation());
+
+    };
   }, []);
 
   // Button press animations
@@ -85,25 +164,67 @@ export default function PhotoUploadScreen() {
     });
   };
 
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  };
+
+
+  const triggerPhotoFlip = (photoIndex: number) => {
+    setFlippingPhotoIndex(photoIndex);
+
+    const flipAnim = photoFlipAnims[photoIndex];
+    flipAnim.setValue(0);
+
+    // Flip animation from placeholder (front) to photo (back)
+    Animated.timing(flipAnim, {
+      toValue: 1,
+      duration: 800,
+      easing: Easing.out(Easing.back(1.2)),
+      useNativeDriver: true,
+    }).start(() => {
+      setFlippingPhotoIndex(null);
+    });
+  };
+
+
   const requestPermissions = async () => {
     if (Platform.OS !== 'web') {
-      // Request camera roll permissions
-      const mediaLibraryStatus = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (mediaLibraryStatus.status !== 'granted') {
-        Alert.alert(
-          'Permission Required',
-          'Sorry, we need camera roll permissions to select photos from your library.',
-          [{ text: 'OK' }]
-        );
-        return false;
-      }
+      try {
+        // Request permissions with proper error handling
+        const [mediaLibraryStatus, cameraStatus] = await Promise.all([
+          ImagePicker.requestMediaLibraryPermissionsAsync(),
+          ImagePicker.requestCameraPermissionsAsync()
+        ]);
 
-      // Request camera permissions
-      const cameraStatus = await ImagePicker.requestCameraPermissionsAsync();
-      if (cameraStatus.status !== 'granted') {
+        if (mediaLibraryStatus.status !== 'granted') {
+          Alert.alert(
+            'Permission Required',
+            'Sorry, we need camera roll permissions to select photos from your library.',
+            [{ text: 'OK' }]
+          );
+          return false;
+        }
+
+        if (cameraStatus.status !== 'granted') {
+          Alert.alert(
+            'Permission Required',
+            'Sorry, we need camera permissions to take new photos.',
+            [{ text: 'OK' }]
+          );
+          return false;
+        }
+      } catch (error) {
+        console.error('❌ Permission request error:', error);
         Alert.alert(
-          'Permission Required',
-          'Sorry, we need camera permissions to take new photos.',
+          'Permission Error',
+          'Failed to request permissions. Please try again.',
           [{ text: 'OK' }]
         );
         return false;
@@ -139,19 +260,68 @@ export default function PhotoUploadScreen() {
     );
   };
 
+  const uploadPhotoImmediately = async (photoUri: string, photoIndex: number) => {
+    try {
+      setUploadingPhotoIndex(photoIndex);
+      console.log('📤 Uploading photo immediately:', photoUri);
+
+      // Upload photo using ProgressiveOnboardingService
+      const result = await ProgressiveOnboardingService.uploadPhotos([photoUri]);
+
+      setUploadingPhotoIndex(null);
+
+      if (!result.success || !result.urls || result.urls.length === 0) {
+        Alert.alert('Upload Failed', 'Failed to upload photo. Please try again.');
+        // Remove the photo from state
+        setPhotos(prevPhotos => prevPhotos.filter((_, i) => i !== photoIndex));
+        return false;
+      }
+
+      console.log('✅ Photo uploaded successfully:', result.urls[0]);
+      // Store the uploaded URL
+      setUploadedPhotoUrls(prev => [...prev, result.urls![0]]);
+      return true;
+    } catch (error) {
+      console.error('❌ Photo upload error:', error);
+      setUploadingPhotoIndex(null);
+      Alert.alert('Upload Failed', 'Failed to upload photo. Please try again.');
+      // Remove the photo from state
+      setPhotos(prevPhotos => prevPhotos.filter((_, i) => i !== photoIndex));
+      return false;
+    }
+  };
+
   const takePhotoWithCamera = async () => {
     try {
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         aspect: [1, 1], // Square aspect ratio
-        quality: 0.8,
+        quality: 0.8, // Increased quality to preserve crop details
+        allowsMultipleSelection: false,
+        exif: false, // Disable EXIF data to reduce memory
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
+        // The URI already points to the cropped image since allowsEditing is true
         const newPhoto = result.assets[0].uri;
+        const photoIndex = photos.length;
         setPhotos(prevPhotos => [...prevPhotos, newPhoto]);
-        console.log('✅ Photo taken with camera:', newPhoto);
+
+        // Trigger animations
+        setTimeout(() => {
+          triggerPhotoFlip(photoIndex);
+          playLightHaptic();
+        }, 100);
+
+        console.log('✅ Photo taken with camera (cropped):', newPhoto);
+        console.log('📐 Photo dimensions:', {
+          width: result.assets[0].width,
+          height: result.assets[0].height
+        });
+
+        // Upload immediately in background
+        uploadPhotoImmediately(newPhoto, photoIndex);
       }
     } catch (error) {
       console.error('❌ Camera error:', error);
@@ -165,14 +335,31 @@ export default function PhotoUploadScreen() {
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
         allowsEditing: true,
         aspect: [1, 1], // Square aspect ratio
-        quality: 0.8,
+        quality: 0.8, // Increased quality to preserve crop details
         allowsMultipleSelection: false,
+        exif: false, // Disable EXIF data to reduce memory
       });
 
       if (!result.canceled && result.assets && result.assets.length > 0) {
+        // The URI already points to the cropped image since allowsEditing is true
         const newPhoto = result.assets[0].uri;
+        const photoIndex = photos.length;
         setPhotos(prevPhotos => [...prevPhotos, newPhoto]);
-        console.log('✅ Photo selected from library:', newPhoto);
+
+        // Trigger animations
+        setTimeout(() => {
+          triggerPhotoFlip(photoIndex);
+          playLightHaptic();
+        }, 100);
+
+        console.log('✅ Photo selected from library (cropped):', newPhoto);
+        console.log('📐 Photo dimensions:', {
+          width: result.assets[0].width,
+          height: result.assets[0].height
+        });
+
+        // Upload immediately in background
+        uploadPhotoImmediately(newPhoto, photoIndex);
       }
     } catch (error) {
       console.error('❌ Photo library error:', error);
@@ -198,6 +385,7 @@ export default function PhotoUploadScreen() {
   };
 
   const handleContinue = async () => {
+    // Check if we have at least 4 photos
     if (photos.length < 4) {
       Alert.alert(
         'Minimum Photos Required',
@@ -209,45 +397,151 @@ export default function PhotoUploadScreen() {
       return;
     }
 
+    // Check if any photos are still uploading
+    if (uploadingPhotoIndex !== null) {
+      Alert.alert(
+        'Upload in Progress',
+        'Please wait for all photos to finish uploading.',
+        [{ text: 'OK', style: 'cancel' }]
+      );
+      return;
+    }
+
+    // Check if all photos were uploaded successfully
+    if (uploadedPhotoUrls.length !== photos.length) {
+      Alert.alert(
+        'Upload Incomplete',
+        'Some photos failed to upload. Please try removing and re-adding them.',
+        [{ text: 'OK', style: 'cancel' }]
+      );
+      return;
+    }
+
+    playLightHaptic();
+    triggerButtonSweep();
     await savePhotosAndContinue();
   };
 
   const savePhotosAndContinue = async () => {
+    if (isProgressAnimating) return;
+
     try {
-      // Store photos in both onboarding context AND onboarding service
-      updateData({ photos: photos });
-      OnboardingService.storeTempData('photos', photos);
-      console.log('💾 Photos saved to onboarding context and service:', photos.length);
-      
-      // Continue with onboarding
+      // Photos are already uploaded! Just save to context for backward compatibility
+      const photosCopy = [...photos];
+      updateData({ photos: photosCopy });
+      OnboardingService.storeTempData('photos', photosCopy);
+      console.log('✅ Photos already uploaded, continuing to next screen');
+
+      // Start progress bar animation before navigating
       animateStepByStepProgress();
     } catch (error) {
       console.error('❌ Error handling photos:', error);
-      // Still continue with onboarding even if there's an error
-      animateStepByStepProgress();
+      // Navigate on error to prevent stuck state
+      if (!hasNavigatedRef.current) {
+        hasNavigatedRef.current = true;
+        setTimeout(() => router.push('/(onboarding)/mascot-phase3'), 150);
+      }
     }
   };
 
   const animateStepByStepProgress = () => {
+    if (isProgressAnimating) return;
+
+    progressFillAnim.setValue(0);
     setIsProgressAnimating(true);
-    
-    // Animate from current step progress to next step progress
+    hasNavigatedRef.current = false; // Reset navigation flag
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
+
+    // Animate from current step progress to completion
     Animated.timing(progressFillAnim, {
       toValue: 1,
-      duration: 1000,
+      duration: 1200,
       useNativeDriver: false,
     }).start(() => {
-      // Navigate after smooth animation
-      setTimeout(() => {
-        // Navigate to next step
-      router.push('/(onboarding)/interests');
-      }, 200);
+      detachHaptics();
+
+      // Trigger completion celebration when progress bar fills
+      triggerProgressBarCompletion();
+
+      playOnboardingProgressHaptic(CURRENT_STEP, TOTAL_STEPS);
+
+      // Don't navigate here - let the celebration handle navigation
     });
   };
 
+  const triggerProgressBarCompletion = () => {
+    // Reset completion animations
+    progressGlowAnim.setValue(0);
+    progressPulseAnim.setValue(1);
+
+    // Enhanced completion haptics sequence
+    playLightHaptic(); // Initial completion
+    setTimeout(() => playLightHaptic(), 100); // Pulse 1
+    setTimeout(() => playLightHaptic(), 200); // Pulse 2
+    setTimeout(() => playLightHaptic(), 300); // Pulse 3
+    setTimeout(() => {
+      // Success haptic for completion
+      import('expo-haptics').then((Haptics) => {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      });
+    }, 400);
+
+    // Run glow and pulse animations in parallel and navigate after they complete
+    Animated.parallel([
+      Animated.sequence([
+        Animated.timing(progressGlowAnim, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.timing(progressGlowAnim, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: true,
+        }),
+      ]),
+      Animated.sequence([
+        Animated.timing(progressPulseAnim, {
+          toValue: 1.08,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+        Animated.timing(progressPulseAnim, {
+          toValue: 1.02,
+          duration: 150,
+          useNativeDriver: true,
+        }),
+        Animated.timing(progressPulseAnim, {
+          toValue: 1,
+          duration: 200,
+          useNativeDriver: true,
+        }),
+      ]),
+    ]).start(() => {
+      if (!hasNavigatedRef.current) {
+        hasNavigatedRef.current = true;
+        router.push('/(onboarding)/mascot-phase3');
+      }
+    });
+
+  };
+
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.PHOTO_UPLOAD);
     });
   };
 
@@ -255,27 +549,101 @@ export default function PhotoUploadScreen() {
     const photoSlots = [];
     const maxPhotos = 6;
 
-    // Render existing photos
+    // Render existing photos with flip card animation
     for (let i = 0; i < photos.length; i++) {
       const isMainPhoto = i === 0;
+      const flipAnim = photoFlipAnims[i];
+
       photoSlots.push(
-        <View key={`photo-${i}`} style={isMainPhoto ? styles.mainPhotoContainer : styles.photoContainer}>
-          <Image 
-            source={{ uri: photos[i] }} 
-            style={isMainPhoto ? styles.mainPhotoImage : styles.photoImage}
-            contentFit="cover"
-          />
-          <TouchableOpacity
-            style={styles.removeButton}
-            onPress={() => handleRemovePhoto(i)}
-          >
-            <Ionicons name="close" size={16} color="#FFFFFF" />
-          </TouchableOpacity>
-          {isMainPhoto && (
-            <View style={styles.mainPhotoBadge}>
-              <Text style={styles.mainPhotoText}>Main</Text>
-            </View>
-          )}
+        <View
+          key={`photo-${i}`}
+          style={isMainPhoto ? styles.mainPhotoContainer : styles.photoContainer}
+        >
+          {/* Flip Card Container */}
+          <View style={styles.flipCardContainer}>
+            {/* Front Side - Add Photo Placeholder */}
+            <Animated.View
+              style={[
+                styles.flipCardSide,
+                styles.flipCardFront,
+                {
+                  opacity: flipAnim.interpolate({
+                    inputRange: [0, 0.5, 1],
+                    outputRange: [1, 0, 0],
+                  }),
+                  transform: [
+                    {
+                      rotateY: flipAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ['0deg', '180deg'],
+                      }),
+                    },
+                    {
+                      scale: flipAnim.interpolate({
+                        inputRange: [0, 0.3, 1],
+                        outputRange: [1, 1.1, 1],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <LinearGradient
+                colors={isMainPhoto ? ['#FFF5F8', '#FFE5F0'] : ['#FAFAFA', '#F3F4F6']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.flipCardPlaceholderGradient}
+              >
+                <Text style={styles.flipCardAddText}>+</Text>
+                <Text style={styles.flipCardAddLabel}>Add Photo</Text>
+              </LinearGradient>
+            </Animated.View>
+
+            {/* Back Side - Actual Photo */}
+            <Animated.View
+              style={[
+                styles.flipCardSide,
+                styles.flipCardBack,
+                {
+                  opacity: flipAnim.interpolate({
+                    inputRange: [0, 0.5, 1],
+                    outputRange: [0, 0, 1],
+                  }),
+                  transform: [
+                    {
+                      rotateY: flipAnim.interpolate({
+                        inputRange: [0, 1],
+                        outputRange: ['-180deg', '0deg'],
+                      }),
+                    },
+                    {
+                      scale: flipAnim.interpolate({
+                        inputRange: [0, 0.3, 1],
+                        outputRange: [1, 1.1, 1],
+                      }),
+                    },
+                  ],
+                },
+              ]}
+            >
+              <Image
+                source={{ uri: photos[i] }}
+                style={isMainPhoto ? styles.mainPhotoImage : styles.photoImage}
+                contentFit="cover"
+              />
+              <TouchableOpacity
+                style={styles.removeButton}
+                onPress={() => handleRemovePhoto(i)}
+              >
+                <Ionicons name="close" size={16} color="#FFFFFF" />
+              </TouchableOpacity>
+              {isMainPhoto && (
+                <View style={styles.mainPhotoBadge}>
+                  <Text style={styles.mainPhotoText}>Main</Text>
+                </View>
+              )}
+            </Animated.View>
+          </View>
         </View>
       );
     }
@@ -320,131 +688,123 @@ export default function PhotoUploadScreen() {
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
         >
-          {/* Header */}
-          <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
-            <View style={styles.backButtonContainer}>
-              <BackButton
-                onPress={handleBackPress}
-                animatedValue={backButtonScale}
-                color="#c3b1e1"
-                size={72}
-                iconSize={28}
-              />
+          <Animated.View style={[styles.topRow, { opacity: fadeAnim }]}>
+            <View style={styles.backButtonWrapper}>
+              <Animated.View style={{
+                opacity: backButtonOpacity,
+                transform: [{ scale: backButtonScale }],
+              }}>
+                <BackButton
+                  onPress={handleBackPress}
+                  color="#c3b1e1"
+                  size={72}
+                  iconSize={28}
+                />
+              </Animated.View>
             </View>
-            
-            <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>Photo Upload</Text>
-              <View style={styles.progressContainer}>
-              <ProgressBar 
-                currentStep={8} 
-                totalSteps={17} 
-                variant="gradient"
-                size="small"
-                fill={isProgressAnimating ? progressFillAnim : undefined}
-                isAnimating={isProgressAnimating}
+            <View style={styles.progressWrapper}>
+              <Animated.View
+                style={[
+                  styles.progressBarContainer,
+                  {
+                    transform: [{ scale: progressPulseAnim }],
+                  },
+                ]}
+              >
+                <ProgressBar
+                  currentStep={CURRENT_STEP}
+                  totalSteps={TOTAL_STEPS}
+                  previousStep={PREVIOUS_STEP}
+                  showStepNumbers={false}
+                  variant="gradient"
+                  size="medium"
+                  fill={progressFillAnim}
+                  isAnimating={isProgressAnimating}
                   style={styles.progressBar}
-              />
-              </View>
+                />
+
+                {/* Progress bar completion glow effect */}
+                <Animated.View
+                  style={[
+                    styles.progressGlow,
+                    {
+                      opacity: progressGlowAnim,
+                    },
+                  ]}
+                  pointerEvents="none"
+                />
+
+              </Animated.View>
             </View>
-            
-            <View style={styles.headerRight} />
+            <View style={styles.topRowSpacer} />
           </Animated.View>
 
           {/* Main Content */}
-          <Animated.View style={[styles.content, { opacity: contentOpacity }]}>
-            <View style={styles.illustrationContainer}>
-              <LinearGradient
-                colors={['#F8F4FF', '#FFF0F5']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.illustrationGradient}
-              >
-                <Ionicons name="camera" size={40} color="#FF4F81" />
-              </LinearGradient>
-            </View>
-            
-            <Text style={styles.title}>Add Your Photos</Text>
+          <Animated.View
+            style={[
+              styles.content,
+              {
+                opacity: contentOpacity,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <Text style={styles.title}>Add your photos</Text>
             <Text style={styles.subtitle}>
-              Let's put a face to your profile!
+              Add anywhere from 4 to 6 of the most jaw dropping photos of you
             </Text>
 
             {/* Photo Grid */}
             <Animated.View style={[styles.photoGrid, { opacity: formOpacity }]}>
               {renderPhotoGrid()}
             </Animated.View>
-
-            {/* Photo Count */}
-            <Animated.View style={[styles.photoCountContainer, { opacity: formOpacity }]}>
-              <Text style={styles.photoCountText}>
-                {photos.length} of 6 photos added
-              </Text>
-              {photos.length > 0 && (
-                <Text style={styles.photoCountSubtext}>
-                  {photos.length < 4 ? `Add ${4 - photos.length} more photo${4 - photos.length === 1 ? '' : 's'} to continue` : 
-                   photos.length < 6 ? 'Great! You can add 2 more photos.' : 
-                   'Perfect! You have the maximum photos.'}
-                </Text>
-              )}
-            </Animated.View>
-
-            {/* Info Box */}
-            <Animated.View style={[styles.infoBox, { opacity: formOpacity }]}>
-              <View style={styles.infoHeader}>
-                <View style={styles.infoIconContainer}>
-                  <Ionicons name="bulb" size={20} color="#FF4F81" />
-                </View>
-                <Text style={styles.infoTitle}>Photo Tips</Text>
-              </View>
-              <View style={styles.tipsList}>
-                <View style={styles.tipItem}>
-                  <View style={styles.tipBullet} />
-                  <Text style={styles.tipText}>Choose clear, well-lit photos</Text>
-                </View>
-                <View style={styles.tipItem}>
-                  <View style={styles.tipBullet} />
-                  <Text style={styles.tipText}>Include a mix of close-ups and full-body shots</Text>
-                </View>
-                <View style={styles.tipItem}>
-                  <View style={styles.tipBullet} />
-                  <Text style={styles.tipText}>Show your personality and interests</Text>
-                </View>
-                <View style={styles.tipItem}>
-                  <View style={styles.tipBullet} />
-                  <Text style={styles.tipText}>Avoid group photos or heavily filtered images</Text>
-                </View>
-                <View style={styles.tipItem}>
-                  <View style={styles.tipBullet} />
-                  <Text style={styles.tipText}>Make your first photo your best one!</Text>
-                </View>
-            </View>
-            </Animated.View>
           </Animated.View>
         </ScrollView>
 
-        {/* Continue Button Footer */}
-        <View style={styles.footerContainer}>
-          <Animated.View style={[styles.buttonContainer, { opacity: formOpacity }]}>
-            <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
-              <TouchableOpacity 
+        <Animated.View style={[styles.floatingButtonContainer, { opacity: formOpacity }]}>
+          <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+            <TouchableOpacity
+              style={[styles.continueButton, photos.length < 4 && styles.disabledButton]}
+              onPress={handleContinue}
+              activeOpacity={0.8}
+              disabled={photos.length < 4}
+            >
+              <Animated.View
+                pointerEvents="none"
                 style={[
-                  styles.continueButton,
-                  (photos.length < 4) && styles.disabledButton
-                ]} 
-                onPress={handleContinue}
-                activeOpacity={0.8}
-                disabled={photos.length < 4}
-                >
-                  <Text style={[
-                    styles.continueButtonText,
-                  (photos.length < 4) && styles.disabledButtonText
-                  ]}>
-                  {photos.length < 4 ? `Add ${4 - photos.length} more photo${4 - photos.length === 1 ? '' : 's'}` : 'Continue'}
-                  </Text>
-              </TouchableOpacity>
-            </Animated.View>
-            </Animated.View>
-          </View>
+                  styles.buttonHighlight,
+                  {
+                    opacity: buttonHighlightAnim.interpolate({
+                      inputRange: [0, 0.2, 0.8, 1],
+                      outputRange: [0, 0.45, 0.25, 0],
+                    }),
+                    transform: [
+                      {
+                        translateX: buttonHighlightAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-220, 220],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <LinearGradient
+                  colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                  start={{ x: 0, y: 0.5 }}
+                  end={{ x: 1, y: 0.5 }}
+                  style={styles.buttonHighlightGradient}
+                />
+              </Animated.View>
+              <Text style={[styles.continueButtonText, photos.length < 4 && styles.disabledButtonText]}>
+                {photos.length < 4 ? `Add ${4 - photos.length} more photo${4 - photos.length === 1 ? '' : 's'}` : 'Continue'}
+              </Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </Animated.View>
+
       </KeyboardAvoidingView>
+
     </SafeAreaView>
   );
 }
@@ -462,78 +822,108 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    paddingBottom: SPACING['3xl'],
   },
-  header: {
+  topRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingVertical: SPACING.md,   // Using design system token
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB', // Light border color from design system
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    position: 'relative', // Enable absolute positioning for center content
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.sm,
   },
-  backButtonContainer: {
-    width: 72, // Even bigger container
-    marginLeft: -SPACING.md, // Move further left using design system token
-    zIndex: 1, // Ensure it's above other elements
+  backButtonWrapper: {
+    width: 72,
+    marginLeft: -SPACING.lg,
   },
-  headerCenter: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  progressWrapper: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 0, // Behind the back button
+    paddingHorizontal: 10,
   },
-  headerTitle: {
-    fontSize: 20, // Slightly larger for main title
-    fontWeight: '600', // SemiBold weight for prominence
-    color: '#1B1B3A', // Primary text color from design system
-    marginBottom: SPACING.sm, // Using design system token
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+  topRowSpacer: {
+    width: 48,
   },
-  progressContainer: {
-    width: '60%', // Make it shorter
-    paddingHorizontal: SPACING.md, // Using design system token
+  progressBarContainer: {
+    position: 'relative',
+    alignItems: 'center',
   },
   progressBar: {
-    marginTop: SPACING.xs, // Using design system token
+    width: 160,
   },
-  headerRight: {
-    width: 72, // Same size as back button for balance
+  progressGlow: {
+    position: 'absolute',
+    top: -8,
+    left: -8,
+    right: -8,
+    bottom: -8,
+    borderRadius: 24,
+    backgroundColor: 'rgba(255, 79, 129, 0.3)',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#FF4F81',
+        shadowOffset: { width: 0, height: 0 },
+        shadowOpacity: 0.6,
+        shadowRadius: 12,
+      },
+      android: {
+        elevation: 8,
+      },
+    }),
+  },
+  // Flip Card Animation Styles
+  flipCardContainer: {
+    position: 'relative',
+    width: '100%',
+    height: '100%',
+  },
+  flipCardSide: {
+    position: 'absolute',
+    width: '100%',
+    height: '100%',
+    backfaceVisibility: 'hidden',
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  flipCardFront: {
+    zIndex: 2,
+  },
+  flipCardBack: {
     zIndex: 1,
+  },
+  flipCardPlaceholderGradient: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 18,
+  },
+  flipCardAddText: {
+    fontSize: 32,
+    color: '#9CA3AF',
+    marginBottom: 6,
+    fontWeight: '300',
+  },
+  flipCardAddLabel: {
+    fontSize: 12,
+    color: '#6B7280',
+    textAlign: 'center',
+    fontWeight: '600',
+    fontFamily: Fonts.semiBold,
   },
   content: {
     flex: 1,
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingTop: SPACING.lg,        // Using design system token
-    paddingBottom: SPACING.lg,     // Add bottom padding for content
-    // Grid-based layout structure
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  illustrationContainer: {
-    alignItems: 'center',
-    marginBottom: SPACING.lg, // Using design system token
-  },
-  illustrationGradient: {
-    width: 80,
-    height: 80,
-    borderRadius: 40, // Full radius for circle
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#FF4F81', // Pink shadow
-        shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-        elevation: 8,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.xl,
+    paddingBottom: SPACING.lg,
+    alignItems: 'flex-start',
   },
   title: {
     fontSize: 28, // Large title size
     fontWeight: '700', // Bold weight from design system
     color: '#1B1B3A', // Primary text color from design system
-    textAlign: 'center',
+    textAlign: 'left',
     marginBottom: SPACING.sm, // Using design system token
     lineHeight: 36,
     letterSpacing: -0.5,
@@ -542,10 +932,10 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16, // Body text size from design system
     color: '#6B7280', // Secondary text color from design system
-    textAlign: 'center',
+    textAlign: 'left',
     marginBottom: SPACING['2xl'], // Using design system token
     lineHeight: 24,
-    paddingHorizontal: SPACING.md, // Using design system token
+    paddingRight: SPACING.lg, // Using design system token
     fontFamily: Fonts.regular, // Inter Regular from design system
   },
   photoGrid: {
@@ -556,41 +946,47 @@ const styles = StyleSheet.create({
     marginBottom: 24,
   },
   photoContainer: {
-    width: '30%', // 3 across - smaller width
-    aspectRatio: 4/5, // Rectangular aspect ratio
-    marginBottom: 12,
+    width: '30%',
+    aspectRatio: 4/5,
+    marginBottom: 16,
     position: 'relative',
-    borderRadius: 12,
+    borderRadius: 20,
     overflow: 'hidden',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 2,
+    borderColor: '#F3F4F6',
     ...Platform.select({
       ios: {
-        shadowColor: '#FF4F81',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
+        shadowColor: '#000000',
+        shadowOffset: { width: 0, height: 4 },
+        shadowOpacity: 0.08,
+        shadowRadius: 12,
       },
       android: {
-        elevation: 2,
-        shadowColor: '#FF4F81',
+        elevation: 4,
+        shadowColor: '#000000',
       },
     }),
   },
   mainPhotoContainer: {
-    width: '30%', // Same as other photos - no special treatment
-    aspectRatio: 4/5, // Same rectangular aspect ratio
-    marginBottom: 12,
+    width: '30%',
+    aspectRatio: 4/5,
+    marginBottom: 16,
     position: 'relative',
-    borderRadius: 12,
+    borderRadius: 20,
     overflow: 'hidden',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 3,
+    borderColor: '#FF4F81',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
+        shadowOffset: { width: 0, height: 6 },
+        shadowOpacity: 0.15,
+        shadowRadius: 16,
       },
       android: {
-        elevation: 2,
+        elevation: 6,
         shadowColor: '#FF4F81',
       },
     }),
@@ -598,12 +994,12 @@ const styles = StyleSheet.create({
   photoImage: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: 18,
   },
   mainPhotoImage: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: 17,
   },
   photoGradient: {
     width: '100%',
@@ -618,57 +1014,67 @@ const styles = StyleSheet.create({
   },
   removeButton: {
     position: 'absolute',
-    top: 8,
-    right: 8,
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: '#EF4444', // Error color from design system
+    top: 10,
+    right: 10,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#FF4F81',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
     ...Platform.select({
       ios: {
         shadowColor: '#000000',
         shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
+        shadowOpacity: 0.15,
+        shadowRadius: 6,
       },
       android: {
-        elevation: 3,
+        elevation: 4,
       },
     }),
   },
   addPhotoButton: {
-    width: '30%', // 3 across - smaller width
-    aspectRatio: 4/5, // Rectangular aspect ratio
-    marginBottom: 12,
-    borderRadius: 12,
+    width: '30%',
+    aspectRatio: 4/5,
+    marginBottom: 16,
+    borderRadius: 20,
     overflow: 'hidden',
+    backgroundColor: '#FAFAFA',
+    borderWidth: 2,
+    borderColor: '#E5E7EB',
+    borderStyle: 'dashed',
     ...Platform.select({
       ios: {
-        shadowColor: '#FF4F81',
+        shadowColor: '#000000',
         shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.05,
-        shadowRadius: 4,
+        shadowOpacity: 0.04,
+        shadowRadius: 8,
       },
       android: {
         elevation: 2,
-        shadowColor: '#FF4F81',
+        shadowColor: '#000000',
       },
     }),
   },
   addMainPhotoButton: {
-    width: '30%', // Same as other photos - no special treatment
-    aspectRatio: 4/5, // Same rectangular aspect ratio
-    marginBottom: 12,
-    borderRadius: 12,
+    width: '30%',
+    aspectRatio: 4/5,
+    marginBottom: 16,
+    borderRadius: 20,
     overflow: 'hidden',
+    backgroundColor: '#FFF5F8',
+    borderWidth: 2,
+    borderColor: '#FF4F81',
+    borderStyle: 'dashed',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
         shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.05,
-        shadowRadius: 4,
+        shadowOpacity: 0.08,
+        shadowRadius: 8,
       },
       android: {
         elevation: 2,
@@ -679,158 +1085,76 @@ const styles = StyleSheet.create({
   addPhotoGradient: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#E5E7EB', // Light border color from design system
-    borderStyle: 'dashed',
   },
   addMainPhotoGradient: {
     width: '100%',
     height: '100%',
-    borderRadius: 12,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#E5E7EB', // Light border color from design system
-    borderStyle: 'dashed',
   },
   addPhotoText: {
-    fontSize: 36,
-    color: '#FF4F81', // Primary pink from design system
-    marginBottom: 8,
+    fontSize: 32,
+    color: '#9CA3AF',
+    marginBottom: 6,
     fontWeight: '300',
   },
   addPhotoLabel: {
-    fontSize: 14,
-    color: '#FF4F81', // Primary pink from design system
+    fontSize: 12,
+    color: '#6B7280',
     textAlign: 'center',
     fontWeight: '600',
+    fontFamily: Fonts.semiBold,
   },
   mainPhotoBadge: {
     position: 'absolute',
-    top: 8,
-    left: 8,
-    backgroundColor: '#c3b1e1', // Purple from design system
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    bottom: 10,
+    left: 10,
+    backgroundColor: '#c3b1e1',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     zIndex: 1,
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
     ...Platform.select({
       ios: {
         shadowColor: '#000000',
         shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.1,
-        shadowRadius: 4,
+        shadowOpacity: 0.15,
+        shadowRadius: 6,
       },
       android: {
-        elevation: 3,
+        elevation: 4,
       },
     }),
   },
   mainPhotoText: {
-    color: '#FFFFFF', // White text from design system
-    fontSize: 11,
+    color: '#FFFFFF',
+    fontSize: 10,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.8,
+    fontFamily: Fonts.bold,
   },
-  photoCountContainer: {
-    marginBottom: 24,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: '#FAFAFA', // Secondary background from design system
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#E5E7EB', // Light border color from design system
-  },
-  photoCountText: {
-    fontSize: 14,
-    color: '#FF4F81', // Primary pink from design system
-    textAlign: 'center',
-    fontWeight: '600',
-  },
-  photoCountSubtext: {
-    fontSize: 12,
-    color: '#6B7280', // Secondary text color from design system
-    textAlign: 'center',
-    marginTop: 4,
-  },
-  infoBox: {
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    borderRadius: BORDER_RADIUS.md, // Using design system token
-    padding: SPACING.lg, // Using design system token
-    marginBottom: SPACING.lg, // Using design system token
-    borderWidth: 1,
-    borderColor: '#E5E7EB', // Light border color from design system
-    width: '100%',
-    shadowColor: '#FF4F81', // Pink shadow
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
-    elevation: 4,
-  },
-  infoHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: SPACING.md, // Using design system token
-  },
-  infoIconContainer: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: '#FFF0F5', // Light pink background
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: SPACING.sm, // Using design system token
-  },
-  infoTitle: {
-    fontSize: 18, // Larger title
-    fontWeight: '600', // SemiBold weight
-    color: '#1B1B3A', // Primary text color from design system
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-  },
-  tipsList: {
-    gap: SPACING.sm, // Using design system token
-  },
-  tipItem: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: SPACING.sm, // Using design system token
-  },
-  tipBullet: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#FF4F81', // Primary pink from design system
-    marginTop: 6, // Align with text baseline
-  },
-  tipText: {
-    flex: 1,
-    color: '#6B7280', // Secondary text color from design system
-    fontSize: 14, // Small text size from design system
-    lineHeight: 20,
-    fontFamily: Fonts.regular, // Inter Regular from design system
-  },
-  footerContainer: {
-    backgroundColor: '#FFFFFF', // White background
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB', // Light border color
-    paddingTop: SPACING.lg, // Consistent with design system grid
-    paddingBottom: SPACING.md, // Consistent bottom padding
-  },
-  buttonContainer: {
-    paddingHorizontal: SPACING.xl, // Using design system token (32px)
-    paddingBottom: SPACING.sm, // Minimal bottom padding
+  floatingButtonContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: SPACING.lg,
+    paddingHorizontal: SPACING.xl,
   },
   continueButton: {
-    backgroundColor: '#FF4F81', // Primary pink from design system
-    paddingVertical: 18, // From design system primary button spec
-    paddingHorizontal: SPACING.xl, // Using design system token (32px)
-    borderRadius: 16, // From design system primary button spec
+    backgroundColor: '#FF4F81',
+    paddingVertical: 18,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 56, // From design system primary button spec
+    minHeight: 56,
+    width: '100%',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
@@ -845,16 +1169,26 @@ const styles = StyleSheet.create({
     }),
   },
   continueButtonText: {
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-    fontWeight: '600', // SemiBold weight from design system
-    fontSize: 18, // From design system primary button spec
-    color: '#FFFFFF', // White text from design system
-    letterSpacing: 0.5, // From design system primary button spec
+    fontFamily: Fonts.semiBold,
+    fontWeight: '600',
+    fontSize: 18,
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
   },
   disabledButton: {
-    opacity: 0.5, // Reduced opacity for disabled state
+    opacity: 0.5,
   },
   disabledButtonText: {
-    opacity: 0.7, // Slightly more visible text when disabled
+    opacity: 0.7,
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
 });

@@ -1,24 +1,33 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
   Animated,
-  Alert
+  Alert,
+  TextInput,
+  Easing,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
 // import { BlurView } from 'expo-blur';
 import { useUser } from '../../contexts/UserContext';
-import { useOnboarding } from '../../OnboardingContext';
-import { SPACING, BORDER_RADIUS } from '../../utils/constants';
-import { Colors, Gradients } from '../../utils/colors';
-import { Button, Input, Card, ProgressBar, BackButton } from '../../components/ui';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
+import { SPACING } from '../../utils/constants';
+import { Colors, Gradients, GradientConfigs } from '../../utils/colors';
+import {
+  attachProgressHaptics,
+  playLightHaptic,
+  playOnboardingProgressHaptic,
+} from '../../utils/haptics';
+import * as Haptics from 'expo-haptics';
+import { ProgressBar, BackButton } from '../../components/ui';
 import { Fonts } from '../../utils/fonts';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -30,28 +39,47 @@ export default function PasswordCreationScreen() {
   const [isLoading, setIsLoading] = useState(false);
   const [showAccountConnectPopup, setShowAccountConnectPopup] = useState(false);
   const [isProgressAnimating, setIsProgressAnimating] = useState(false);
+  const TOTAL_STEPS = 5;
+  const CURRENT_STEP = 5;
+  const PREVIOUS_STEP = 4;
   const { updateUserProfile } = useUser();
-  const { updateData } = useOnboarding();
+  const { updateData, setCurrentStep } = useOnboarding();
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
-  const slideAnim = useRef(new Animated.Value(30)).current;
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const formOpacity = useRef(new Animated.Value(0)).current;
   const buttonOpacity = useRef(new Animated.Value(0)).current;
   const progressFillAnim = useRef(new Animated.Value(0)).current;
+
+
+  useFocusEffect(
+    React.useCallback(() => {
+      progressFillAnim.stopAnimation();
+      progressFillAnim.setValue(0);
+      setIsProgressAnimating(false);
+      return undefined;
+    }, [progressFillAnim])
+  );
   
   // Refs for keyboard handling
   const scrollViewRef = useRef<ScrollView>(null);
   const formRef = useRef<View>(null);
+  const passwordFillAnim = useRef(new Animated.Value(0)).current;
+  const confirmFillAnim = useRef(new Animated.Value(0)).current;
+  const [activeField, setActiveField] = useState<'password' | 'confirm' | null>(null);
   
   // Button press animations
   const buttonScale = useRef(new Animated.Value(1)).current;
-  const backButtonScale = useRef(new Animated.Value(1)).current;
-  const popupScale = useRef(new Animated.Value(0.9)).current;
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    // Staggered entrance animations
+    // Register this step for resume functionality
+    setCurrentStep(ONBOARDING_STEPS.PASSWORD_CREATION);
+
+    // Staggered entrance animations including back button fade + scale
     Animated.sequence([
       Animated.parallel([
         Animated.timing(fadeAnim, {
@@ -59,9 +87,15 @@ export default function PasswordCreationScreen() {
           duration: 600,
           useNativeDriver: true,
         }),
-        Animated.timing(slideAnim, {
-          toValue: 0,
-          duration: 600,
+        // Back button fade + scale combo animation
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]),
@@ -82,6 +116,25 @@ export default function PasswordCreationScreen() {
       }),
     ]).start();
   }, []);
+
+  useEffect(() => {
+    const target = Math.min(password.length / 12, 1);
+    Animated.timing(passwordFillAnim, {
+      toValue: target,
+      duration: 200,
+      useNativeDriver: false,
+    }).start();
+  }, [password, passwordFillAnim]);
+
+  useEffect(() => {
+    const baseLength = password.length > 0 ? password.length : 12;
+    const target = Math.min(confirmPassword.length / baseLength, 1);
+    Animated.timing(confirmFillAnim, {
+      toValue: target,
+      duration: 200,
+      useNativeDriver: false,
+    }).start();
+  }, [confirmPassword, password, confirmFillAnim]);
 
   // Password validation
   const validatePassword = (pass: string) => {
@@ -123,6 +176,53 @@ export default function PasswordCreationScreen() {
     });
   };
 
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const savePasswordToProfile = async () => {
+    try {
+      console.log('🔐 Saving password to auth user...');
+
+      // Correct path to Supabase client from onboarding screens
+      const { supabase } = await import('../../lib/supabase');
+
+      // Update the user's password
+      const { error: updateError } = await supabase.auth.updateUser({
+        password: password
+      });
+
+      if (updateError) {
+        // Allow duplicate passwords: treat "new password equals old password" as success/no-op
+        if (typeof updateError.message === 'string' && updateError.message.includes('New password should be different from the old password')) {
+          console.log('ℹ️ Password unchanged (same as old). Treating as success.');
+        } else {
+          console.error('❌ Error setting password:', updateError);
+          // Don't fail completely - password can be set later
+          Alert.alert(
+            'Warning',
+            'Password may not have been saved. You can set it later in settings.',
+            [{ text: 'Continue' }]
+          );
+        }
+      } else {
+        console.log('✅ Password saved successfully');
+      }
+
+      return { success: true };
+    } catch (error) {
+      console.error('❌ Error in savePasswordToProfile:', error);
+      return { success: false };
+    }
+  };
+
   const handleCreateAccount = async () => {
     if (!isFormValid) return;
 
@@ -135,52 +235,105 @@ export default function PasswordCreationScreen() {
     console.log('🔐 Password validation results:', passwordValidation);
     console.log('🔐 === END PASSWORD CREATION START ===');
 
-    // Start step-by-step progress animation
-    animateStepByStepProgress();
+    // Add haptic feedback and button animation
+    playLightHaptic();
+    triggerButtonSweep();
+
+    // Save password to Supabase Auth
+    setIsLoading(true);
+    await savePasswordToProfile();
+    setIsLoading(false);
+
+    // Store password in OnboardingContext for backward compatibility
+    updateData({ password: password });
+
+    // Start step-by-step progress animation with button press animation
+    animateButtonPress(buttonScale, animateStepByStepProgress);
   };
 
   const animateStepByStepProgress = () => {
+    progressFillAnim.setValue(0);
     setIsProgressAnimating(true);
-    
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
+
     // Animate from current step progress to next step progress
     Animated.timing(progressFillAnim, {
       toValue: 1,
       duration: 1000,
       useNativeDriver: false,
     }).start(() => {
-      // Navigate after smooth animation
-      setTimeout(() => {
-        console.log('🔐 === PASSWORD SAVE TO USERCONTEXT ===');
-        console.log('🔐 Password being saved to UserContext:', password ? 'YES' : 'NO');
-        console.log('🔐 Password length:', password?.length || 0);
-        console.log('🔐 Password value (first 3 chars):', password ? password.substring(0, 3) + '...' : 'undefined');
-        console.log('🔐 Password type:', typeof password);
-        console.log('🔐 Password validation passed:', passwordValidation.isValid);
-        console.log('🔐 About to call updateUserProfile with password');
-        console.log('🔐 === END PASSWORD SAVE TO USERCONTEXT ===');
-        
-        // Store password in OnboardingContext for account creation
-        updateData({ password: password });
-        
-        updateUserProfile({ 
-          onboardingCompleted: true 
-        });
-        
-        console.log('🔐 === AFTER UPDATEUSERPROFILE CALL ===');
-        console.log('🔐 updateUserProfile called successfully');
-        console.log('🔐 Navigating to notifications screen');
-        console.log('🔐 === END AFTER UPDATEUSERPROFILE CALL ===');
-        
-        router.push('/(onboarding)/legal-agreements');
-      }, 200);
+      detachHaptics();
+      setIsProgressAnimating(false);
+      playOnboardingProgressHaptic(CURRENT_STEP, TOTAL_STEPS);
+      // Celebration will be triggered by progress bar onAnimationComplete callback
     });
+  };
+
+  const startCelebrationSequence = () => {
+    console.log('🔐 === PASSWORD SAVE TO USERCONTEXT ===');
+    console.log('🔐 Password being saved to UserContext:', password ? 'YES' : 'NO');
+    console.log('🔐 Password length:', password?.length || 0);
+    console.log('🔐 Password value (first 3 chars):', password ? password.substring(0, 3) + '...' : 'undefined');
+    console.log('🔐 Password type:', typeof password);
+    console.log('🔐 Password validation passed:', passwordValidation.isValid);
+    console.log('🔐 About to call updateUserProfile with password');
+    console.log('🔐 === END PASSWORD SAVE TO USERCONTEXT ===');
+
+    // Store password in OnboardingContext for account creation
+    updateData({ password: password });
+
+    updateUserProfile({
+      onboardingCompleted: true
+    });
+
+    console.log('🔐 === AFTER UPDATEUSERPROFILE CALL ===');
+    console.log('🔐 updateUserProfile called successfully');
+    console.log('🔐 Navigating to notifications screen');
+    console.log('🔐 === END AFTER UPDATEUSERPROFILE CALL ===');
+
+    // Navigate immediately
+    router.push('/(onboarding)/mascot-phase2');
+  };
+
+  const playOnboardingCompletionHaptics = () => {
+    // Celebration haptic sequence for onboarding completion
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+
+    setTimeout(() => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy).catch(() => {});
+    }, 150);
+
+    setTimeout(() => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    }, 300);
+
+    setTimeout(() => {
+      Haptics.selectionAsync().catch(() => {});
+    }, 450);
+
+    setTimeout(() => {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    }, 600);
   };
 
   // Removed animateColorTransitionProgress function
 
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.PASSWORD_CREATION);
     });
   };
 
@@ -204,23 +357,6 @@ export default function PasswordCreationScreen() {
     }
   };
 
-  const renderPasswordRequirement = (isMet: boolean, text: string) => (
-    <View style={styles.requirementRow}>
-      <Text style={[
-        styles.requirementIcon,
-        isMet ? styles.requirementMet : styles.requirementUnmet
-      ]}>
-        {isMet ? '✓' : '○'}
-      </Text>
-      <Text style={[
-        styles.requirementText,
-        isMet ? styles.requirementMet : styles.requirementUnmet
-      ]}>
-        {text}
-      </Text>
-    </View>
-  );
-
   return (
     <SafeAreaView style={styles.container}>
       <KeyboardAvoidingView 
@@ -228,159 +364,217 @@ export default function PasswordCreationScreen() {
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
-        <ScrollView 
-          ref={scrollViewRef}
-          style={styles.scrollView}
-          contentContainerStyle={styles.scrollContent}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          automaticallyAdjustKeyboardInsets={true}
-        >
-          {/* Header */}
-          <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
-            <View style={styles.backButtonContainer}>
-              <BackButton
-                onPress={handleBackPress}
-                animatedValue={backButtonScale}
-                color="#c3b1e1"
-                size={72}
-                iconSize={28}
-              />
-            </View>
-            
-            <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>Create Password</Text>
-              <View style={styles.progressContainer}>
-              <ProgressBar 
-                  currentStep={5} 
-                totalSteps={17} 
-                variant="gradient"
-                size="small"
-                fill={isProgressAnimating ? progressFillAnim : undefined}
-                isAnimating={isProgressAnimating}
-                  style={styles.progressBar}
-              />
+        <View style={styles.contentWrapper}>
+          <ScrollView 
+            ref={scrollViewRef}
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            automaticallyAdjustKeyboardInsets={true}
+          >
+            <Animated.View style={[styles.topRow, { opacity: fadeAnim }]}>
+              <View style={styles.backButtonWrapper}>
+                <Animated.View style={{
+                  opacity: backButtonOpacity,
+                  transform: [{ scale: backButtonScale }],
+                }}>
+                  <BackButton
+                    onPress={handleBackPress}
+                    color="#c3b1e1"
+                    size={72}
+                    iconSize={28}
+                  />
+                </Animated.View>
               </View>
-            </View>
-            
-            <View style={styles.headerRight} />
-          </Animated.View>
-
-          {/* Main Content */}
-          <Animated.View style={[styles.content, { opacity: contentOpacity }]}>
-            <View style={styles.illustrationContainer}>
-              <LinearGradient
-                colors={['#F8F4FF', '#FFF0F5']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.illustrationGradient}
-              >
-                <Ionicons name="lock-closed" size={40} color="#FF4F81" />
-              </LinearGradient>
-            </View>
-            
-            <Text style={styles.title}>Secure Your Account</Text>
-            <Text style={styles.subtitle}>
-              Create a strong password to protect your account
-            </Text>
-
-            {/* Password Form */}
-            <Animated.View ref={formRef} style={[styles.formContainer, { opacity: formOpacity }]}>
-              <LinearGradient
-                colors={['#F8F4FF', '#FFFFFF']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.formCard}
-              >
-                <Input
-                  label="Password"
-                  placeholder="Create a strong password"
-                  value={password}
-                  onChangeText={setPassword}
-                  onFocus={handleInputFocus}
-                  secureTextEntry={!showPassword}
-                  leftIcon={<Ionicons name="lock-closed" size={18} color="#9CA3AF" />}
-                  rightIcon={
-                    <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-                      <Ionicons 
-                        name={showPassword ? "eye" : "eye-off"} 
-                        size={18} 
-                        color="#9CA3AF" 
-                      />
-                    </TouchableOpacity>
-                  }
-                  onRightIconPress={() => setShowPassword(!showPassword)}
-                  style={styles.passwordInput}
+              <View style={styles.progressWrapper}>
+                <ProgressBar
+                  currentStep={CURRENT_STEP}
+                  previousStep={PREVIOUS_STEP}
+                  totalSteps={TOTAL_STEPS}
+                  showStepNumbers={false}
+                  variant="gradient"
+                  size="medium"
+                  fill={isProgressAnimating ? progressFillAnim : undefined}
+                  isAnimating={isProgressAnimating}
+                  useMoti
+                  gradientColors={GradientConfigs.phaseOneProgress.colors}
+                  style={styles.progressBar}
+                  onAnimationComplete={startCelebrationSequence}
                 />
-                
-                <Input
-                  label="Confirm Password"
-                  placeholder="Confirm your password"
-                  value={confirmPassword}
-                  onChangeText={setConfirmPassword}
-                  onFocus={handleInputFocus}
-                  secureTextEntry={!showConfirmPassword}
-                  leftIcon={<Ionicons name="lock-closed" size={18} color="#9CA3AF" />}
-                  rightIcon={
-                    <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)}>
-                      <Ionicons 
-                        name={showConfirmPassword ? "eye" : "eye-off"} 
-                        size={18} 
-                        color="#9CA3AF" 
-                      />
-                    </TouchableOpacity>
-                  }
-                  onRightIconPress={() => setShowConfirmPassword(!showConfirmPassword)}
-                  style={styles.passwordInput}
-                />
+              </View>
+              {/* Empty spacer to match blocked-schools layout */}
+              <View style={{ width: 48, height: 48 }} />
+            </Animated.View>
 
-                {/* Password Requirements */}
-                <View style={styles.requirementsContainer}>
-                  <Text style={styles.requirementsTitle}>Password Requirements:</Text>
-                  {renderPasswordRequirement(passwordValidation.minLength, 'At least 8 characters')}
-                  {renderPasswordRequirement(passwordValidation.hasUpperCase, 'One uppercase letter')}
-                  {renderPasswordRequirement(passwordValidation.hasLowerCase, 'One lowercase letter')}
-                  {renderPasswordRequirement(passwordValidation.hasNumbers, 'One number')}
-                  {renderPasswordRequirement(passwordValidation.hasSpecialChar, 'One special character')}
-                  {renderPasswordRequirement(passwordsMatch, 'Passwords match')}
+            <Animated.View style={[styles.content, { opacity: contentOpacity }]}>
+              <Text style={styles.title}>Create Password</Text>
+              <Text style={styles.subtitle}>
+                Choose a strong password with 8+ characters, upper & lower case letters, a number, and a special symbol.
+              </Text>
+
+              <Animated.View ref={formRef} style={[styles.formContainer, { opacity: formOpacity }]}>
+                <View style={styles.inputSection}>
+                  <View style={styles.labelRow}>
+                    <Text style={styles.inputLabel}>Password</Text>
+                    <TouchableOpacity
+                      onPress={() => setShowPassword((prev) => !prev)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Text style={styles.toggleButtonText}>
+                        {showPassword ? 'Hide' : 'Show'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <TextInput
+                    style={styles.lineInput}
+                    placeholder="Create a strong password"
+                    placeholderTextColor="#9CA3AF"
+                    value={password}
+                    onChangeText={setPassword}
+                    onFocus={() => {
+                      handleInputFocus();
+                      setActiveField('password');
+                    }}
+                    onBlur={() => setActiveField(null)}
+                    secureTextEntry={!showPassword}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    selectionColor="#FF4F81"
+                  />
+                  <View
+                    style={[
+                      styles.lineTrack,
+                      (activeField === 'password' || password.length > 0) && styles.lineTrackActive,
+                    ]}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.lineFill,
+                        {
+                          width: passwordFillAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: ['0%', '100%'],
+                          }),
+                        },
+                      ]}
+                    />
+                  </View>
                 </View>
-              </LinearGradient>
-            </Animated.View>
-          </Animated.View>
-        </ScrollView>
 
-        {/* Create Account Button Footer */}
-        <View style={styles.footerContainer}>
-            <Animated.View style={[styles.buttonContainer, { opacity: buttonOpacity }]}>
-            <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
-              <TouchableOpacity
-                style={[
-                  styles.createAccountButton,
-                  (!isFormValid || isLoading) && styles.disabledButton
-                ]}
-                onPress={handleCreateAccount}
-                activeOpacity={0.8}
-                disabled={!isFormValid || isLoading}
-              >
-                <Text style={[
-                  styles.createAccountButtonText,
-                  (!isFormValid || isLoading) && styles.disabledButtonText
-                ]}>
-                {isLoading ? 'Creating Account...' : 'Create Account'}
-                </Text>
-              </TouchableOpacity>
+                <View style={[styles.inputSection, styles.lastInputSection]}>
+                  <View style={styles.labelRow}>
+                    <Text style={styles.inputLabel}>Confirm Password</Text>
+                    <TouchableOpacity
+                      onPress={() => setShowConfirmPassword((prev) => !prev)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Text style={styles.toggleButtonText}>
+                        {showConfirmPassword ? 'Hide' : 'Show'}
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                  <TextInput
+                    style={styles.lineInput}
+                    placeholder="Confirm your password"
+                    placeholderTextColor="#9CA3AF"
+                    value={confirmPassword}
+                    onChangeText={setConfirmPassword}
+                    onFocus={() => {
+                      handleInputFocus();
+                      setActiveField('confirm');
+                    }}
+                    onBlur={() => setActiveField(null)}
+                    secureTextEntry={!showConfirmPassword}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    selectionColor="#FF4F81"
+                  />
+                  <View
+                    style={[
+                      styles.lineTrack,
+                      (activeField === 'confirm' || confirmPassword.length > 0) && styles.lineTrackActive,
+                    ]}
+                  >
+                    <Animated.View
+                      style={[
+                        styles.lineFill,
+                        {
+                          width: confirmFillAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: ['0%', '100%'],
+                          }),
+                        },
+                      ]}
+                    />
+                  </View>
+                  {confirmPassword.length > 0 && !passwordsMatch && (
+                    <Text style={styles.errorText}>Passwords do not match</Text>
+                  )}
+                </View>
+
+              </Animated.View>
             </Animated.View>
-          </Animated.View>
+          </ScrollView>
         </View>
 
-          {/* Account Connect Popup */}
-          {showAccountConnectPopup && (
-            <View 
+        <Animated.View style={[styles.floatingButtonContainer, { opacity: buttonOpacity }]}>
+          <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+            <TouchableOpacity
+              style={[
+                styles.createAccountButton,
+                (!isFormValid || isLoading) && styles.disabledButton
+              ]}
+              onPress={handleCreateAccount}
+              activeOpacity={0.8}
+              disabled={!isFormValid || isLoading}
+            >
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.buttonHighlight,
+                  {
+                    opacity: buttonHighlightAnim.interpolate({
+                      inputRange: [0, 0.2, 0.8, 1],
+                      outputRange: [0, 0.45, 0.25, 0],
+                    }),
+                    transform: [
+                      {
+                        translateX: buttonHighlightAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-220, 220],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <LinearGradient
+                  colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                  start={{ x: 0, y: 0.5 }}
+                  end={{ x: 1, y: 0.5 }}
+                  style={styles.buttonHighlightGradient}
+                />
+              </Animated.View>
+              <Text style={[
+                styles.createAccountButtonText,
+                (!isFormValid || isLoading) && styles.disabledButtonText
+              ]}>
+                {isLoading ? 'Creating Account...' : 'Create Account'}
+              </Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </Animated.View>
+
+
+        {/* Account Connect Popup */}
+        {showAccountConnectPopup && (
+            <View
               style={[styles.popupOverlay, { backgroundColor: 'rgba(0, 0, 0, 0.5)' }]}
             >
-              <Animated.View 
-                style={[styles.popupContainer, { 
+              <Animated.View
+                style={[styles.popupContainer, {
                   opacity: showAccountConnectPopup ? 1 : 0,
                   transform: [
                     { scale: showAccountConnectPopup ? 1 : 0.9 },
@@ -409,7 +603,7 @@ export default function PasswordCreationScreen() {
                     onPress={() => {
                       // Handle Apple Sign In
                       updateUserProfile({ appleConnected: true } as any);
-                      router.push('/(onboarding)/legal-agreements');
+                      router.push('/(onboarding)/mascot-phase2');
                     }}
                     activeOpacity={0.8}
                   >
@@ -427,7 +621,7 @@ export default function PasswordCreationScreen() {
                     onPress={() => {
                       // Handle Google Sign In
                       updateUserProfile({ googleConnected: true } as any);
-                      router.push('/(onboarding)/legal-agreements');
+                      router.push('/(onboarding)/mascot-phase2');
                     }}
                     activeOpacity={0.8}
                   >
@@ -444,7 +638,7 @@ export default function PasswordCreationScreen() {
                     style={styles.skipButton}
                     onPress={() => {
                       setShowAccountConnectPopup(false);
-                      router.push('/(onboarding)/legal-agreements');
+                      router.push('/(onboarding)/mascot-phase2');
                     }}
                     activeOpacity={0.7}
                   >
@@ -467,152 +661,119 @@ const styles = StyleSheet.create({
   keyboardAvoidingView: {
     flex: 1,
   },
+  contentWrapper: {
+    flex: 1,
+  },
   scrollView: {
     flex: 1,
   },
   scrollContent: {
     flexGrow: 1,
+    paddingBottom: SPACING['3xl'] + SPACING.lg,
   },
-  header: {
+  topRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingVertical: SPACING.md,   // Using design system token
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB', // Light border color from design system
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    position: 'relative', // Enable absolute positioning for center content
+    justifyContent: 'space-between',
+    paddingTop: SPACING.lg,
+    paddingHorizontal: SPACING.lg,
+    marginBottom: SPACING['2xl'],
   },
-  backButtonContainer: {
-    width: 72, // Even bigger container
-    marginLeft: -SPACING.md, // Move further left using design system token
-    zIndex: 1, // Ensure it's above other elements
+  backButtonWrapper: {
+    marginLeft: -SPACING.lg,
   },
-  headerCenter: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  progressWrapper: {
+    flex: 1,
     alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 0, // Behind the back button
-  },
-  headerTitle: {
-    fontSize: 20, // Slightly larger for main title
-    fontWeight: '600', // SemiBold weight for prominence
-    color: '#1B1B3A', // Primary text color from design system
-    marginBottom: SPACING.sm, // Using design system token
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-  },
-  progressContainer: {
-    width: '60%', // Make it shorter
-    paddingHorizontal: SPACING.md, // Using design system token
   },
   progressBar: {
-    marginTop: SPACING.xs, // Using design system token
-  },
-  headerRight: {
-    width: 72, // Same size as back button for balance
-    zIndex: 1,
+    width: 160,
   },
   content: {
     flex: 1,
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingTop: SPACING.lg,        // Using design system token
-    paddingBottom: SPACING.lg,     // Add bottom padding for content
-    // Grid-based layout structure
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  illustrationContainer: {
-    alignItems: 'center',
-    marginBottom: SPACING.lg, // Using design system token
-  },
-  illustrationGradient: {
-    width: 80,
-    height: 80,
-    borderRadius: 40, // Full radius for circle
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#FF4F81', // Pink shadow
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 8,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.xl,
+    paddingBottom: SPACING.lg,
+    alignItems: 'stretch',
   },
   title: {
-    fontSize: 28, // Large title size
-    fontWeight: '700', // Bold weight from design system
-    color: '#1B1B3A', // Primary text color from design system
-    textAlign: 'center',
-    marginBottom: SPACING.sm, // Using design system token
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#1B1B3A',
+    textAlign: 'left',
+    marginBottom: SPACING.xs,
     lineHeight: 36,
     letterSpacing: -0.5,
-    fontFamily: Fonts.bold, // Poppins Bold from design system
+    fontFamily: Fonts.bold,
   },
   subtitle: {
-    fontSize: 16, // Body text size from design system
-    color: '#6B7280', // Secondary text color from design system
-    textAlign: 'center',
-    marginBottom: SPACING['2xl'], // Using design system token
+    fontSize: 16,
+    color: '#6B7280',
+    textAlign: 'left',
+    marginBottom: SPACING['2xl'],
     lineHeight: 24,
-    paddingHorizontal: SPACING.md, // Using design system token
-    fontFamily: Fonts.regular, // Inter Regular from design system
+    fontFamily: Fonts.regular,
   },
   formContainer: {
-    marginBottom: 0, // No margin since button is at bottom
+    marginBottom: 0,
+    width: '100%',
   },
-  formCard: {
-    borderRadius: BORDER_RADIUS.md, // Using design system token
-    padding: SPACING.lg, // Using design system token
-    overflow: 'hidden', // For gradient background
+  inputSection: {
+    marginBottom: SPACING['2xl'],
+    width: '100%',
   },
-  passwordInput: {
-    marginBottom: SPACING.md, // Using design system token
+  lastInputSection: {
+    marginBottom: SPACING.lg,
   },
-  requirementsContainer: {
-    marginTop: SPACING.lg, // Using design system token
-    paddingTop: SPACING.lg, // Using design system token
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB', // Light border color from design system
-  },
-  requirementsTitle: {
-    fontSize: 16, // UI elements size from design system
-    fontWeight: '600', // SemiBold weight
-    color: '#1B1B3A', // Primary text color from design system
-    marginBottom: SPACING.md, // Using design system token
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-  },
-  requirementRow: {
+  labelRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: SPACING.sm, // Using design system token
+    justifyContent: 'space-between',
+    marginBottom: SPACING.xs,
   },
-  requirementIcon: {
+  inputLabel: {
     fontSize: 16,
-    marginRight: SPACING.sm, // Using design system token
-    fontWeight: 'bold',
+    fontFamily: Fonts.semiBold,
+    color: '#1B1B3A',
   },
-  requirementText: {
-    fontSize: 14, // Small text size from design system
-    lineHeight: 20,
-    fontFamily: Fonts.regular, // Inter Regular from design system
+  toggleButtonText: {
+    fontSize: 14,
+    fontFamily: Fonts.semiBold,
+    color: '#FF4F81',
   },
-  requirementMet: {
-    color: '#c3b1e1', // Purple color from design system
+  lineInput: {
+    fontSize: 20,
+    fontFamily: Fonts.semiBold,
+    color: '#1B1B3A',
+    paddingVertical: 8,
+    width: '100%',
   },
-  requirementUnmet: {
-    color: '#9CA3AF', // Tertiary text color from design system
+  lineTrack: {
+    height: 2,
+    backgroundColor: '#E5E7EB',
+    width: '100%',
+    borderRadius: 1,
+    overflow: 'hidden',
   },
-  footerContainer: {
-    backgroundColor: '#FFFFFF', // White background
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB', // Light border color
-    paddingTop: SPACING.lg, // Consistent with design system grid
-    paddingBottom: SPACING.md, // Consistent bottom padding
+  lineTrackActive: {
+    backgroundColor: '#D6BBFB',
   },
-  buttonContainer: {
-    paddingHorizontal: SPACING.xl, // Using design system token (32px)
-    paddingBottom: SPACING.sm, // Minimal bottom padding
+  lineFill: {
+    height: '100%',
+    backgroundColor: '#c3b1e1',
+  },
+  errorText: {
+    marginTop: SPACING.sm,
+    fontSize: 14,
+    color: '#EF4444',
+    fontFamily: Fonts.regular,
+  },
+  floatingButtonContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: SPACING.lg,
+    paddingHorizontal: SPACING.xl,
   },
   createAccountButton: {
     backgroundColor: '#FF4F81', // Primary pink from design system
@@ -622,6 +783,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 56, // From design system primary button spec
+    width: '100%',
+    overflow: 'hidden',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
@@ -634,6 +797,16 @@ const styles = StyleSheet.create({
         shadowColor: '#FF4F81',
       },
     }),
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
   createAccountButtonText: {
     fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
@@ -766,4 +939,3 @@ const styles = StyleSheet.create({
      letterSpacing: -0.2,
    },
 });
-

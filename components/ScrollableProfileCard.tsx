@@ -6,10 +6,10 @@ import {
   ScrollView,
   Dimensions,
   TouchableOpacity,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FontAwesome5 } from '@expo/vector-icons';
-import { PhotoUploadService } from '../services/photoUpload';
 import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import * as Haptics from 'expo-haptics';
@@ -37,43 +37,26 @@ export interface ProfileData {
 
 interface ScrollableProfileCardProps {
   profile: ProfileData;
-  onUndo?: () => void;
-  canUndo?: boolean;
   onLike?: () => void;
   onDislike?: () => void;
   onReport?: () => void;
+  onRefresh?: () => void;
+  isRefreshing?: boolean;
 }
 
 const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
   profile,
-  onUndo,
-  canUndo = false,
   onLike,
   onDislike,
   onReport,
+  onRefresh,
+  isRefreshing = false,
 }, ref) => {
   const [displayPhotos, setDisplayPhotos] = useState<string[]>(profile.photos || []);
-  const [isRefreshingUrls, setIsRefreshingUrls] = useState(false);
 
-  // Refresh signed URLs when component mounts or photos change
+  // Use provided photos directly; upstream now supplies long-lived, pre-signed URLs.
   useEffect(() => {
-    const refreshUrls = async () => {
-      if (profile.photos && profile.photos.length > 0) {
-        setIsRefreshingUrls(true);
-        try {
-          const refreshedUrls = await PhotoUploadService.refreshSignedUrls(profile.photos);
-          setDisplayPhotos(refreshedUrls);
-        } catch (error) {
-          console.error('❌ Error refreshing signed URLs:', error);
-          // Fallback to original URLs
-          setDisplayPhotos(profile.photos);
-        } finally {
-          setIsRefreshingUrls(false);
-        }
-      }
-    };
-
-    refreshUrls();
+    setDisplayPhotos(profile.photos || []);
   }, [profile.photos]);
 
   return (
@@ -82,6 +65,19 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
         style={styles.scrollView}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={styles.scrollContent}
+        nestedScrollEnabled
+        refreshControl={
+          onRefresh
+            ? (
+              <RefreshControl
+                refreshing={isRefreshing}
+                onRefresh={onRefresh}
+                tintColor="#FF4F81"
+                colors={['#FF4F81', '#c3b1e1']}
+              />
+            )
+            : undefined
+        }
       >
         {/* Unified Profile Card Container */}
         <View style={styles.profileCard}>
@@ -92,6 +88,8 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
                 source={{ uri: displayPhotos[0] }} 
                 style={styles.mainPhoto}
                 contentFit="cover"
+                cachePolicy="disk"
+                transition={0}
                 onError={(error) => {
                   console.log('❌ Image load error:', error);
                   console.log('❌ Image URI:', displayPhotos[0]);
@@ -124,18 +122,6 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
               </View>
             )}
 
-            {/* Undo Button */}
-            {canUndo && (
-              <TouchableOpacity 
-                style={styles.undoButton}
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  onUndo?.();
-                }}
-              >
-                <FontAwesome5 name="undo" size={20} color="#FFFFFF" />
-              </TouchableOpacity>
-            )}
           </View>
 
           {/* Content below main photo - seamlessly connected */}
@@ -214,6 +200,8 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
               source={{ uri: displayPhotos[1] }} 
               style={styles.additionalPhoto}
               contentFit="cover"
+              cachePolicy="disk"
+              transition={0}
               onError={(error) => {
                 console.log('❌ Additional image load error:', error);
                 console.log('❌ Additional image URI:', displayPhotos[1]);
@@ -241,7 +229,7 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
         {/* 8. Picture 3 */}
         {displayPhotos[2] && (
           <View style={styles.photoSection}>
-            <Image source={{ uri: displayPhotos[2] }} style={styles.additionalPhoto} contentFit="cover" />
+            <Image source={{ uri: displayPhotos[2] }} style={styles.additionalPhoto} contentFit="cover" cachePolicy="disk" transition={0} />
           </View>
         )}
 
@@ -260,7 +248,7 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
         {/* 10. Picture 4 */}
         {displayPhotos[3] && (
           <View style={styles.photoSection}>
-            <Image source={{ uri: displayPhotos[3] }} style={styles.additionalPhoto} contentFit="cover" />
+            <Image source={{ uri: displayPhotos[3] }} style={styles.additionalPhoto} contentFit="cover" cachePolicy="disk" transition={0} />
           </View>
         )}
 
@@ -279,14 +267,14 @@ const ScrollableProfileCard = forwardRef<View, ScrollableProfileCardProps>(({
         {/* 12. Picture 5 */}
         {displayPhotos[4] && (
           <View style={styles.photoSection}>
-            <Image source={{ uri: displayPhotos[4] }} style={styles.additionalPhoto} contentFit="cover" />
+            <Image source={{ uri: displayPhotos[4] }} style={styles.additionalPhoto} contentFit="cover" cachePolicy="disk" transition={0} />
           </View>
         )}
 
         {/* 13. Picture 6 */}
         {displayPhotos[5] && (
           <View style={styles.photoSection}>
-            <Image source={{ uri: displayPhotos[5] }} style={styles.additionalPhoto} contentFit="cover" />
+            <Image source={{ uri: displayPhotos[5] }} style={styles.additionalPhoto} contentFit="cover" cachePolicy="disk" transition={0} />
           </View>
         )}
 
@@ -437,24 +425,6 @@ const styles = StyleSheet.create({
     fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
     letterSpacing: 0.5,
   },
-  undoButton: {
-    position: 'absolute',
-    top: SPACING.xl, // Using design system token
-    left: SPACING.lg, // Using design system token
-    width: 56, // Slightly larger for better touch target
-    height: 56, // Slightly larger for better touch target
-    borderRadius: 28, // Half of width/height for perfect circle
-    backgroundColor: 'rgba(0, 0, 0, 0.6)', // Slightly more opaque
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
-  },
   contentContainer: {
     backgroundColor: '#FFFFFF', // Primary white background from design system
     paddingTop: SPACING.lg, // Using design system token
@@ -522,17 +492,19 @@ const styles = StyleSheet.create({
     // No background, padding, or borders - just like other text sections
   },
   promptQuestion: {
-    fontSize: 16, // Body text size from design system
-    fontWeight: '600', // SemiBold weight from design system
+    fontSize: 14, // Smaller text for the question (like Hinge)
+    fontWeight: '500', // Medium weight from design system
     color: '#c3b1e1', // Primary purple from design system
     marginBottom: SPACING.sm, // Using design system token
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+    fontFamily: Fonts.medium, // Poppins Medium from design system
+    letterSpacing: 0.2, // Subtle letter spacing
   },
   promptAnswer: {
-    fontSize: 16, // Body text size from design system
+    fontSize: 18, // Larger text for the answer (prominent like Hinge)
     color: '#1B1B3A', // Primary text color from design system
-    lineHeight: 24, // Body line height from design system
-    fontFamily: Fonts.regular, // Inter Regular from design system
+    lineHeight: 26, // Adjusted line height for larger text
+    fontFamily: Fonts.semiBold, // SemiBold for more impact
+    fontWeight: '600', // SemiBold weight for emphasis
   },
   bottomSpacing: {
     height: SPACING.xl, // Using design system token

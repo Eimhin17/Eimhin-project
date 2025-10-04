@@ -1,44 +1,44 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
-  Dimensions,
-  Alert,
   Animated,
   TextInput,
-  Keyboard
+  Easing,
+  Alert,
 } from 'react-native';
 import { router } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
-import { useOnboarding } from '../../OnboardingContext';
-import { SPACING, BORDER_RADIUS } from '../../utils/constants';
-import { Colors, Gradients } from '../../utils/colors';
-import { Button, Input, Card, ProgressBar, BackButton } from '../../components/ui';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
+import { SPACING } from '../../utils/constants';
+import { ProgressBar, BackButton } from '../../components/ui';
 import { Fonts } from '../../utils/fonts';
 import { UsernameValidationService } from '../../services/usernameValidation';
-import { Ionicons } from '@expo/vector-icons';
+import { ProgressiveOnboardingService } from '../../services/progressiveOnboarding';
+import { LinearGradient } from 'expo-linear-gradient';
+import { attachProgressHaptics, playLightHaptic, playOnboardingProgressHaptic } from '../../utils/haptics';
 
 export default function BasicDetailsScreen() {
-  const [firstName, setFirstName] = useState('');
-  const [username, setUsername] = useState('');
-  const [dateOfBirth, setDateOfBirth] = useState(new Date(2006, 0, 1));
-  const [dayValue, setDayValue] = useState('01');
-  const [monthValue, setMonthValue] = useState('01');
-  const [yearValue, setYearValue] = useState('2006');
-  const [calculatedAge, setCalculatedAge] = useState<number | null>(null);
-  const [isProgressAnimating, setIsProgressAnimating] = useState(false);
+  const { data, updateData, setCurrentStep } = useOnboarding();
+
+  const [firstName, setFirstName] = useState(data.firstName ?? '');
+  const [username, setUsername] = useState(data.username ?? '');
   const [usernameError, setUsernameError] = useState<string>('');
   const [usernameSuggestions, setUsernameSuggestions] = useState<string[]>([]);
   const [isValidatingUsername, setIsValidatingUsername] = useState(false);
-  const [showAgeModal, setShowAgeModal] = useState(false);
-  const [hasFormBeenPositioned, setHasFormBeenPositioned] = useState(false);
-  const { updateData } = useOnboarding();
+  const [focusedField, setFocusedField] = useState<'firstName' | 'username' | null>(null);
+  const [isProgressAnimating, setIsProgressAnimating] = useState(false);
+  const [showUsernameConfetti, setShowUsernameConfetti] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const TOTAL_STEPS = 5;
+  const CURRENT_STEP = 1;
+  const PREVIOUS_STEP = 0;
 
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
@@ -46,21 +46,42 @@ export default function BasicDetailsScreen() {
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const formOpacity = useRef(new Animated.Value(0)).current;
   const buttonOpacity = useRef(new Animated.Value(0)).current;
+  const progressFillAnim = useRef(new Animated.Value(0)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
+
+  // Confetti and popup animations (REDUCED from 12 to 4 for memory safety)
+  const popupScale = useRef(new Animated.Value(0)).current;
+  const popupOpacity = useRef(new Animated.Value(0)).current;
+  const confettiAnimations = useRef(
+    Array.from({ length: 4 }, () => ({
+      x: new Animated.Value(0),
+      y: new Animated.Value(0),
+      rotation: new Animated.Value(0),
+      opacity: new Animated.Value(0),
+    }))
+  ).current;
 
   // Button press animations
   const buttonScale = useRef(new Animated.Value(1)).current;
-  const backButtonScale = useRef(new Animated.Value(1)).current;
-  const progressFillAnim = useRef(new Animated.Value(0)).current;
-  
-  // ScrollView ref for keyboard handling
-  const scrollViewRef = useRef<ScrollView>(null);
-  const formRef = useRef<View>(null);
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
 
-  const { height: screenHeight } = Dimensions.get('window');
+  // Sync local state with context data (for back navigation)
+  useEffect(() => {
+    if (data.firstName && data.firstName !== firstName) {
+      setFirstName(data.firstName);
+    }
+    if (data.username && data.username !== username) {
+      setUsername(data.username);
+    }
+  }, [data.firstName, data.username]);
 
   useEffect(() => {
-    // Staggered entrance animations
-    Animated.sequence([
+    // Register this step for resume functionality
+    setCurrentStep(ONBOARDING_STEPS.BASIC_DETAILS);
+
+    // Staggered entrance animations including back button fade + scale
+    const entranceAnimation = Animated.sequence([
       Animated.parallel([
         Animated.timing(fadeAnim, {
           toValue: 1,
@@ -70,6 +91,17 @@ export default function BasicDetailsScreen() {
         Animated.timing(slideAnim, {
           toValue: 0,
           duration: 600,
+          useNativeDriver: true,
+        }),
+        // Back button fade + scale combo animation
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]),
@@ -88,10 +120,144 @@ export default function BasicDetailsScreen() {
         duration: 400,
         useNativeDriver: true,
       }),
-    ]).start();
+    ]);
+
+    entranceAnimation.start();
+
+    // CRITICAL: Cleanup function to prevent memory leaks
+    return () => {
+      entranceAnimation.stop();
+
+      // Stop all confetti animations
+      confettiAnimations.forEach(confetti => {
+        confetti.x.stopAnimation();
+        confetti.y.stopAnimation();
+        confetti.rotation.stopAnimation();
+        confetti.opacity.stopAnimation();
+      });
+
+      // Reset animation values
+      fadeAnim.setValue(0);
+      slideAnim.setValue(30);
+      contentOpacity.setValue(0);
+      formOpacity.setValue(0);
+      buttonOpacity.setValue(0);
+      backButtonOpacity.setValue(0.3);
+      backButtonScale.setValue(0.8);
+    };
   }, []);
 
-  // Validate username as user types
+  // Username available popup and confetti animation
+  const triggerUsernameConfetti = () => {
+    setShowUsernameConfetti(true);
+
+    // Initial success haptic
+    playLightHaptic();
+
+    // Reset popup and confetti animations
+    popupScale.setValue(0);
+    popupOpacity.setValue(0);
+    confettiAnimations.forEach((confetti) => {
+      confetti.x.setValue(0);
+      confetti.y.setValue(0);
+      confetti.rotation.setValue(0);
+      confetti.opacity.setValue(0);
+    });
+
+    // Animate popup first
+    Animated.parallel([
+      Animated.spring(popupScale, {
+        toValue: 1,
+        useNativeDriver: true,
+        tension: 120,
+        friction: 8,
+      }),
+      Animated.timing(popupOpacity, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]).start();
+
+    // Progressive haptic feedback during confetti burst
+    const hapticTimings = [
+      { delay: 0, type: 'light' },      // Initial burst
+      { delay: 200, type: 'light' },   // Peak of burst
+      { delay: 400, type: 'selection' }, // Mid-flight
+      { delay: 800, type: 'selection' }, // Settling
+      { delay: 1200, type: 'light' },  // Final flourish
+    ];
+
+    hapticTimings.forEach(({ delay, type }) => {
+      setTimeout(() => {
+        if (type === 'light') {
+          playLightHaptic();
+        } else {
+          // Selection haptic for variety
+          import('expo-haptics').then((Haptics) => {
+            Haptics.selectionAsync();
+          });
+        }
+      }, delay);
+    });
+
+    // Then animate confetti pieces
+    const confettiAnimations_Array = confettiAnimations.map((confetti, index) => {
+      const randomX = (Math.random() - 0.5) * 400;
+      const randomY = -200 - Math.random() * 100;
+      const randomRotation = Math.random() * 720;
+
+      return Animated.parallel([
+        Animated.timing(confetti.opacity, {
+          toValue: 1,
+          duration: 100,
+          delay: index * 30,
+          useNativeDriver: true,
+        }),
+        Animated.timing(confetti.x, {
+          toValue: randomX,
+          duration: 1800,
+          delay: index * 30,
+          useNativeDriver: true,
+        }),
+        Animated.timing(confetti.y, {
+          toValue: randomY,
+          duration: 1800,
+          delay: index * 30,
+          useNativeDriver: true,
+        }),
+        Animated.timing(confetti.rotation, {
+          toValue: randomRotation,
+          duration: 1800,
+          delay: index * 30,
+          useNativeDriver: true,
+        }),
+      ]);
+    });
+
+    Animated.parallel(confettiAnimations_Array).start();
+
+    // Hide popup and confetti after delay
+    setTimeout(() => {
+      Animated.parallel([
+        Animated.timing(popupOpacity, {
+          toValue: 0,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        ...confettiAnimations.map((confetti) =>
+          Animated.timing(confetti.opacity, {
+            toValue: 0,
+            duration: 500,
+            useNativeDriver: true,
+          })
+        ),
+      ]).start(() => {
+        setShowUsernameConfetti(false);
+      });
+    }, 2500);
+  };
+
   const validateUsername = async (usernameToValidate: string) => {
     if (!usernameToValidate.trim()) {
       setUsernameError('');
@@ -104,7 +270,7 @@ export default function BasicDetailsScreen() {
 
     try {
       const result = await UsernameValidationService.validateUsername(usernameToValidate);
-      
+
       if (!result.isValid) {
         setUsernameError(result.error || 'Invalid username');
         setUsernameSuggestions([]);
@@ -114,6 +280,8 @@ export default function BasicDetailsScreen() {
       } else {
         setUsernameError('');
         setUsernameSuggestions([]);
+        // Trigger confetti celebration when username is available
+        triggerUsernameConfetti();
       }
     } catch (error) {
       console.error('❌ Error validating username:', error);
@@ -124,64 +292,17 @@ export default function BasicDetailsScreen() {
     }
   };
 
-  // Calculate age when date of birth changes
-  useEffect(() => {
-    const today = new Date();
-    const birthDate = new Date(dateOfBirth);
-    let age = today.getFullYear() - birthDate.getFullYear();
-    const monthDiff = today.getMonth() - birthDate.getMonth();
-    
-    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-      age--;
-    }
-    
-    setCalculatedAge(age);
-  }, [dateOfBirth]);
-
-  // Debounced username validation
   useEffect(() => {
     const timeoutId = setTimeout(() => {
       if (username.trim()) {
         validateUsername(username);
       }
-    }, 500); // 500ms delay
+    }, 500);
 
     return () => clearTimeout(timeoutId);
   }, [username]);
 
 
-  const handleDateValueChange = (field: 'day' | 'month' | 'year', value: string) => {
-    // Remove any non-numeric characters
-    const numericValue = value.replace(/\D/g, '');
-    
-    if (field === 'day') {
-      setDayValue(numericValue);
-    } else if (field === 'month') {
-      setMonthValue(numericValue);
-    } else if (field === 'year') {
-      setYearValue(numericValue);
-    }
-    
-    // Update the date if all fields have values
-    const currentDay = field === 'day' ? numericValue : dayValue;
-    const currentMonth = field === 'month' ? numericValue : monthValue;
-    const currentYear = field === 'year' ? numericValue : yearValue;
-    
-    if (currentDay && currentMonth && currentYear) {
-      const day = parseInt(currentDay);
-      const month = parseInt(currentMonth) - 1; // Month is 0-indexed
-      const year = parseInt(currentYear);
-      
-      if (day >= 1 && day <= 31 && month >= 0 && month <= 11 && year >= 1900 && year <= new Date().getFullYear()) {
-        const newDate = new Date(year, month, day);
-        if (!isNaN(newDate.getTime())) {
-          setDateOfBirth(newDate);
-        }
-      }
-    }
-  };
-
-  // Button press animations
   const animateButtonPress = (animValue: Animated.Value, callback?: () => void) => {
     Animated.sequence([
       Animated.timing(animValue, {
@@ -199,359 +320,328 @@ export default function BasicDetailsScreen() {
     });
   };
 
-  const handleContinue = () => {
-    if (!firstName.trim() || !username.trim()) {
-      Alert.alert('Error', 'Please enter both your first name and username');
-      return;
-    }
-
-    if (!dayValue || !monthValue || !yearValue) {
-      Alert.alert('Error', 'Please enter your complete date of birth');
-      return;
-    }
-
-    // Dismiss keyboard before showing modal
-    Keyboard.dismiss();
-    
-    // Show age confirmation modal
-    setShowAgeModal(true);
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
   };
 
-  const animateStepByStepProgress = () => {
+  const animateProgressAndContinue = () => {
+    if (isProgressAnimating) {
+      return;
+    }
+
+    progressFillAnim.setValue(0);
     setIsProgressAnimating(true);
-    
-    // Animate from current step progress to next step progress
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
+
     Animated.timing(progressFillAnim, {
       toValue: 1,
       duration: 1000,
       useNativeDriver: false,
     }).start(() => {
-      // Navigate after smooth animation
-      setTimeout(() => {
-        proceedToNext();
-      }, 200);
+      detachHaptics();
+      setIsProgressAnimating(false);
+      playOnboardingProgressHaptic(CURRENT_STEP, TOTAL_STEPS);
+      router.push('/(onboarding)/date-of-birth');
     });
+  };
+
+  const handleContinue = async () => {
+    if (!firstName.trim() || !username.trim() || usernameError || isValidatingUsername || isSaving) {
+      return;
+    }
+
+    playLightHaptic();
+    triggerButtonSweep();
+
+    // Save to database immediately
+    setIsSaving(true);
+    const result = await ProgressiveOnboardingService.updateProfile({
+      first_name: firstName.trim(),
+      username: username.trim(),
+    });
+    setIsSaving(false);
+
+    if (!result.success) {
+      Alert.alert('Error', 'Failed to save your details. Please try again.');
+      return;
+    }
+
+    // Also save to context for backward compatibility
+    updateData({
+      firstName: firstName.trim(),
+      username: username.trim(),
+    });
+
+    animateButtonPress(buttonScale, animateProgressAndContinue);
   };
 
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.BASIC_DETAILS);
     });
   };
 
-  const handleAgeModalConfirm = () => {
-    setShowAgeModal(false);
-    // Start step-by-step progress animation
-    animateStepByStepProgress();
-  };
-
-  const handleAgeModalCancel = () => {
-    setShowAgeModal(false);
-  };
-
-  const handleInputFocus = () => {
-    // Only scroll once when any field is first focused, then keep the form positioned
-    if (hasFormBeenPositioned) {
-      return; // Don't scroll again if form is already positioned
-    }
-
-    setTimeout(() => {
-      formRef.current?.measureLayout(
-        scrollViewRef.current as any,
-        (x, y, width, height) => {
-          const screenHeight = Dimensions.get('window').height;
-          const keyboardHeight = 300; // Approximate keyboard height
-          const headerHeight = 120; // Approximate header height
-          
-          // Scroll to show the entire form card including DOB fields
-          const scrollY = Math.max(0, y - 200); // Position to show complete form
-          
-          scrollViewRef.current?.scrollTo({ y: scrollY, animated: true });
-          setHasFormBeenPositioned(true); // Mark that form has been positioned
-        },
-        () => {
-          // Fallback scroll position if measure fails
-          scrollViewRef.current?.scrollTo({
-            y: 0,
-            animated: true,
-          });
-          setHasFormBeenPositioned(true);
-        }
-      );
-    }, 100);
-  };
-
-  const proceedToNext = async () => {
-    try {
-      // Update onboarding data
-      updateData({ 
-        firstName: firstName.trim(), 
-        username: username.trim(),
-        dateOfBirth: dateOfBirth,
-        gender: 'woman' // Default gender, will be updated in gender selection
-      });
-      
-      console.log('💾 Basic details saved to onboarding data');
-      router.push('/(onboarding)/gender-selection');
-    } catch (error) {
-      console.error('❌ Error handling basic details:', error);
-      // Still continue with onboarding even if there's an error
-      router.push('/(onboarding)/gender-selection');
-    }
-  };
-
-  const isFormValid = firstName.trim() && username.trim() && !usernameError && !isValidatingUsername;
+  const isFormValid =
+    Boolean(firstName.trim()) && Boolean(username.trim()) && !usernameError && !isValidatingUsername;
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         style={styles.keyboardAvoidingView}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
-        <ScrollView 
-          ref={scrollViewRef}
+        <ScrollView
           style={styles.scrollView}
           contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          automaticallyAdjustKeyboardInsets={true}
         >
-          {/* Header */}
-          <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
-            <View style={styles.backButtonContainer}>
-              <BackButton
-                onPress={handleBackPress} 
-                animatedValue={backButtonScale}
-                color="#c3b1e1"
-                size={72}
-                iconSize={28}
-              />
+          <Animated.View style={[styles.topRow, { opacity: fadeAnim }]}
+          >
+            <View style={styles.backButtonWrapper}>
+              <Animated.View style={{
+                opacity: backButtonOpacity,
+                transform: [{ scale: backButtonScale }],
+              }}>
+                <BackButton
+                  currentStep={ONBOARDING_STEPS.BASIC_DETAILS}
+                  onPress={handleBackPress}
+                  color="#c3b1e1"
+                  size={72}
+                  iconSize={28}
+                />
+              </Animated.View>
             </View>
-            
-            <View style={styles.headerCenter}>
-              <Text style={styles.headerTitle}>Basic Details</Text>
-              <View style={styles.progressContainer}>
-              <ProgressBar 
-                currentStep={6} 
-                totalSteps={17} 
+            <View style={styles.progressWrapper}>
+              <ProgressBar
+                currentStep={CURRENT_STEP}
+                totalSteps={TOTAL_STEPS}
+                previousStep={PREVIOUS_STEP}
+                showStepNumbers={false}
                 variant="gradient"
-                size="small"
+                size="medium"
                 fill={isProgressAnimating ? progressFillAnim : undefined}
                 isAnimating={isProgressAnimating}
-                  style={styles.progressBar}
+                useMoti
+                style={styles.progressBar}
               />
-              </View>
             </View>
-            
-            <View style={styles.headerRight} />
+            <View style={styles.topRowSpacer} />
           </Animated.View>
 
-          {/* Main Content */}
-          <Animated.View style={[styles.content, { opacity: contentOpacity }]}>
-            <View style={styles.illustrationContainer}>
-              <LinearGradient
-                colors={['#F8F4FF', '#FFF0F5']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.illustrationGradient}
-              >
-                <Ionicons name="person" size={40} color="#FF4F81" />
-              </LinearGradient>
-            </View>
-            
-            <Text style={styles.title}>Tell us about yourself</Text>
+          <Animated.View
+            style={[
+              styles.content,
+              {
+                opacity: contentOpacity,
+                transform: [{ translateY: slideAnim }],
+              },
+            ]}
+          >
+            <Text style={styles.title}>Basic details</Text>
             <Text style={styles.subtitle}>
               Let's start with the basics
             </Text>
 
-            {/* Form */}
-            <Animated.View ref={formRef} style={[styles.formContainer, { opacity: formOpacity }]}>
-              <LinearGradient
-                colors={['#F8F4FF', '#FFFFFF']}
-                start={{ x: 0, y: 0 }}
-                end={{ x: 1, y: 1 }}
-                style={styles.formCard}
-              >
-                <Input
-                  label="First Name"
-                  placeholder="Enter your first name"
+            <Animated.View style={[styles.formContainer, { opacity: formOpacity }]}>
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>First name</Text>
+                <TextInput
                   value={firstName}
                   onChangeText={setFirstName}
-                  onFocus={handleInputFocus}
+                  onFocus={() => setFocusedField('firstName')}
+                  onBlur={() => setFocusedField((prev) => (prev === 'firstName' ? null : prev))}
+                  placeholder="e.g. Aoife"
+                  placeholderTextColor="#9CA3AF"
                   autoCapitalize="words"
-                  maxLength={30}
-                  leftIcon={<Ionicons name="person" size={18} color="#9CA3AF" />}
-                  style={styles.nameInput}
+                  autoCorrect={false}
+                  style={styles.inputField}
+                  selectionColor="#FF4F81"
                 />
-                
-                <Input
-                  label="Username"
-                  placeholder="Enter your username"
+                <View
+                  style={[
+                    styles.inputUnderline,
+                    (focusedField === 'firstName' || firstName.trim()) && styles.inputUnderlineActive,
+                  ]}
+                />
+              </View>
+
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Username</Text>
+                <TextInput
                   value={username}
                   onChangeText={setUsername}
-                  onFocus={handleInputFocus}
+                  onFocus={() => setFocusedField('username')}
+                  onBlur={() => setFocusedField((prev) => (prev === 'username' ? null : prev))}
+                  placeholder="Pick something memorable"
+                  placeholderTextColor="#9CA3AF"
                   autoCapitalize="none"
-                  maxLength={30}
-                  error={usernameError}
-                  leftIcon={<Ionicons name="at" size={18} color="#9CA3AF" />}
-                  style={styles.usernameInput}
+                  autoCorrect={false}
+                  maxLength={15}
+                  style={styles.inputField}
+                  selectionColor="#FF4F81"
+                  returnKeyType="done"
                 />
-                
-                {/* Username Suggestions */}
+                <View
+                  style={[
+                    styles.inputUnderline,
+                    (focusedField === 'username' || username.trim()) && styles.inputUnderlineActive,
+                  ]}
+                />
+
+                {usernameError ? (
+                  <Text style={styles.errorText}>{usernameError}</Text>
+                ) : null}
+
+                {isValidatingUsername && (
+                  <Text style={styles.helperText}>Checking availability…</Text>
+                )}
+
                 {usernameSuggestions.length > 0 && (
                   <View style={styles.suggestionsContainer}>
-                    <Text style={styles.suggestionsTitle}>Try these instead:</Text>
-                    {usernameSuggestions.map((suggestion, index) => (
-                      <TouchableOpacity
-                        key={index}
-                        style={styles.suggestionButton}
-                        onPress={() => {
-                          setUsername(suggestion);
-                          setUsernameSuggestions([]);
-                        }}
-                      >
-                        <Text style={styles.suggestionText}>{suggestion}</Text>
-                      </TouchableOpacity>
-                    ))}
+                    <Text style={styles.suggestionsTitle}>Try one of these:</Text>
+                    <View style={styles.suggestionsRow}>
+                      {usernameSuggestions.map((suggestion) => (
+                        <TouchableOpacity
+                          key={suggestion}
+                          style={styles.suggestionPill}
+                          onPress={() => {
+                            setUsername(suggestion);
+                            setUsernameSuggestions([]);
+                          }}
+                        >
+                          <Text style={styles.suggestionText}>{suggestion}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
                   </View>
                 )}
-                
-                <View style={styles.dateInputContainer}>
-                  <Text style={styles.dateInputLabel}>Date of Birth</Text>
-                  <View style={styles.dateInputFields}>
-                    <TextInput
-                      style={styles.dateField}
-                      value={dayValue}
-                      onChangeText={(text) => handleDateValueChange('day', text)}
-                      onFocus={handleInputFocus}
-                      keyboardType="numeric"
-                      maxLength={2}
-                      placeholder="DD"
-                      placeholderTextColor="#9CA3AF"
-                      textAlign="center"
-                    />
-                    
-                    <Text style={styles.dateSeparator}>/</Text>
-                    
-                    <TextInput
-                      style={styles.dateField}
-                      value={monthValue}
-                      onChangeText={(text) => handleDateValueChange('month', text)}
-                      onFocus={handleInputFocus}
-                      keyboardType="numeric"
-                      maxLength={2}
-                      placeholder="MM"
-                      placeholderTextColor="#9CA3AF"
-                      textAlign="center"
-                    />
-                    
-                    <Text style={styles.dateSeparator}>/</Text>
-                    
-                    <TextInput
-                      style={styles.dateField}
-                      value={yearValue}
-                      onChangeText={(text) => handleDateValueChange('year', text)}
-                      onFocus={handleInputFocus}
-                      keyboardType="numeric"
-                      maxLength={4}
-                      placeholder="YYYY"
-                      placeholderTextColor="#9CA3AF"
-                      textAlign="center"
-                    />
-                  </View>
-                </View>
-
-              </LinearGradient>
+              </View>
             </Animated.View>
-
           </Animated.View>
         </ScrollView>
 
-        {/* Continue Button Footer */}
-        <View style={styles.footerContainer}>
-          <Animated.View style={[styles.buttonContainer, { opacity: buttonOpacity }]}>
-            <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
-              <TouchableOpacity
-                style={[
-                  styles.continueButton,
-                  (!isFormValid) && styles.disabledButton
-                ]}
-                onPress={handleContinue}
-                activeOpacity={0.8}
-                disabled={!isFormValid}
-              >
-                <Text style={[
-                  styles.continueButtonText,
-                  (!isFormValid) && styles.disabledButtonText
-                ]}>
-                  Continue
-                </Text>
-              </TouchableOpacity>
+        {/* Username available popup and confetti */}
+        {showUsernameConfetti && (
+          <>
+            {/* Success popup */}
+            <Animated.View
+              style={[
+                styles.usernamePopupContainer,
+                {
+                  opacity: popupOpacity,
+                  transform: [{ scale: popupScale }],
+                },
+              ]}
+            >
+              <View style={styles.usernamePopupContent}>
+                <Text style={styles.usernamePopupIcon}>✅</Text>
+                <Text style={styles.usernamePopupText}>Username is available!</Text>
+              </View>
             </Animated.View>
-          </Animated.View>
-        </View>
-      </KeyboardAvoidingView>
 
-      {/* Age Confirmation Modal */}
-      {showAgeModal && (
-        <View style={styles.ageModal}>
-          <View style={styles.ageModalContent}>
-            <View style={styles.ageModalIcon}>
-              <Ionicons 
-                name={calculatedAge && calculatedAge < 18 ? "warning" : "information-circle"} 
-                size={48} 
-                color={calculatedAge && calculatedAge < 18 ? "#EF4444" : "#FF4F81"} 
-              />
-            </View>
-            
-            <Text style={styles.ageModalTitle}>
-              {calculatedAge && calculatedAge < 18 ? "Age Requirement" : "Confirm Your Age"}
-            </Text>
-            
-            <Text style={styles.ageModalMessage}>
-              {calculatedAge && calculatedAge < 18 
-                ? "Sorry, you are too young to use this app. You must be at least 18 years old to create an account on DebsMatch."
-                : `Are you sure you are ${calculatedAge} years old? This information cannot be changed later.`
-              }
-            </Text>
-            
-            <View style={styles.ageModalButtons}>
-              {calculatedAge && calculatedAge < 18 ? (
-                <TouchableOpacity
-                  style={[styles.ageModalButton, styles.ageModalButtonPrimary]}
-                  onPress={handleAgeModalCancel}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.ageModalButtonText, styles.ageModalButtonTextPrimary]}>
-                    OK
-                      </Text>
-                </TouchableOpacity>
-              ) : (
-                <>
-                  <TouchableOpacity
-                    style={styles.ageModalButton}
-                    onPress={handleAgeModalCancel}
-                    activeOpacity={0.7}
+            {/* Confetti burst */}
+            <View style={styles.confettiContainer} pointerEvents="none">
+              {confettiAnimations.map((confetti, index) => {
+                const shapes = ['rectangle', 'circle', 'triangle'];
+                const colors = ['#FF4F81', '#c3b1e1'];
+                const shape = shapes[index % 3];
+                const color = colors[index % 2];
+
+                return (
+                  <Animated.View
+                    key={index}
+                    style={[
+                      styles.confettiPiece,
+                      {
+                        opacity: confetti.opacity,
+                        transform: [
+                          { translateX: confetti.x },
+                          { translateY: confetti.y },
+                          { rotate: confetti.rotation.interpolate({
+                              inputRange: [0, 360],
+                              outputRange: ['0deg', '360deg'],
+                            }) },
+                        ],
+                      },
+                    ]}
                   >
-                    <Text style={styles.ageModalButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.ageModalButton, styles.ageModalButtonPrimary]}
-                    onPress={handleAgeModalConfirm}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.ageModalButtonText, styles.ageModalButtonTextPrimary]}>
-                      Yes
-                    </Text>
-                  </TouchableOpacity>
-                </>
-              )}
+                    <View style={[
+                      styles.confettiBit,
+                      shape === 'rectangle' && [styles.confettiRectangle, { backgroundColor: color }],
+                      shape === 'circle' && [styles.confettiCircle, { backgroundColor: color }],
+                      shape === 'triangle' && [styles.confettiTriangle, { borderBottomColor: color }],
+                    ]} />
+                  </Animated.View>
+                );
+              })}
             </View>
-          </View>
-        </View>
-      )}
+          </>
+        )}
+
+        <Animated.View style={[styles.floatingButtonContainer, { opacity: buttonOpacity }]}>
+          <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+            <TouchableOpacity
+              style={[styles.continueButton, (!isFormValid || isSaving) && styles.disabledButton]}
+              onPress={handleContinue}
+              activeOpacity={0.8}
+              disabled={!isFormValid || isSaving}
+            >
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.buttonHighlight,
+                  {
+                    opacity: buttonHighlightAnim.interpolate({
+                      inputRange: [0, 0.2, 0.8, 1],
+                      outputRange: [0, 0.45, 0.25, 0],
+                    }),
+                    transform: [
+                      {
+                        translateX: buttonHighlightAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-220, 220],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <LinearGradient
+                  colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                  start={{ x: 0, y: 0.5 }}
+                  end={{ x: 1, y: 0.5 }}
+                  style={styles.buttonHighlightGradient}
+                />
+              </Animated.View>
+              <Text style={[styles.continueButtonText, (!isFormValid || isSaving) && styles.disabledButtonText]}>
+                {isSaving ? 'Saving...' : 'Continue'}
+              </Text>
+            </TouchableOpacity>
+          </Animated.View>
+        </Animated.View>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -559,7 +649,7 @@ export default function BasicDetailsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#FFFFFF', // Primary white background from design system
+    backgroundColor: '#FFFFFF',
   },
   keyboardAvoidingView: {
     flex: 1,
@@ -569,161 +659,143 @@ const styles = StyleSheet.create({
   },
   scrollContent: {
     flexGrow: 1,
+    paddingBottom: SPACING['3xl'],
   },
-  header: {
+  topRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingVertical: SPACING.md,   // Using design system token
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB', // Light border color from design system
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    position: 'relative', // Enable absolute positioning for center content
+    justifyContent: 'space-between',
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.lg,
+    paddingBottom: SPACING.sm,
   },
-  backButtonContainer: {
-    width: 72, // Even bigger container
-    marginLeft: -SPACING.md, // Move further left using design system token
-    zIndex: 1, // Ensure it's above other elements
+  backButtonWrapper: {
+    width: 72,
+    marginLeft: -SPACING.lg,
   },
-  headerCenter: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
+  progressWrapper: {
+    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    zIndex: 0, // Behind the back button
+    paddingHorizontal: 10,
   },
-  headerTitle: {
-    fontSize: 20, // Slightly larger for main title
-    fontWeight: '600', // SemiBold weight for prominence
-    color: '#1B1B3A', // Primary text color from design system
-    marginBottom: SPACING.sm, // Using design system token
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-  },
-  progressContainer: {
-    width: '60%', // Make it shorter
-    paddingHorizontal: SPACING.md, // Using design system token
+  topRowSpacer: {
+    width: 48,
   },
   progressBar: {
-    marginTop: SPACING.xs, // Using design system token
-  },
-  headerRight: {
-    width: 72, // Same size as back button for balance
-    zIndex: 1,
+    width: 160,
   },
   content: {
     flex: 1,
-    paddingHorizontal: SPACING.lg, // Using design system token
-    paddingTop: SPACING.lg,        // Using design system token
-    paddingBottom: SPACING.lg,     // Add bottom padding for content
-    // Grid-based layout structure
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  illustrationContainer: {
-    alignItems: 'center',
-    marginBottom: SPACING.lg, // Using design system token
-  },
-  illustrationGradient: {
-    width: 80,
-    height: 80,
-    borderRadius: 40, // Full radius for circle
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#FF4F81', // Pink shadow
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 20,
-    elevation: 8,
+    paddingHorizontal: SPACING.lg,
+    paddingTop: SPACING.xl,
+    paddingBottom: SPACING.lg,
+    alignItems: 'flex-start',
   },
   title: {
-    fontSize: 28, // Large title size
-    fontWeight: '700', // Bold weight from design system
-    color: '#1B1B3A', // Primary text color from design system
-    textAlign: 'center',
-    marginBottom: SPACING.sm, // Using design system token
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#1B1B3A',
+    textAlign: 'left',
+    marginBottom: SPACING.sm,
     lineHeight: 36,
     letterSpacing: -0.5,
-    fontFamily: Fonts.bold, // Poppins Bold from design system
+    fontFamily: Fonts.bold,
   },
   subtitle: {
-    fontSize: 16, // Body text size from design system
-    color: '#6B7280', // Secondary text color from design system
-    textAlign: 'center',
-    marginBottom: SPACING['2xl'], // Using design system token
+    fontSize: 16,
+    color: '#6B7280',
+    textAlign: 'left',
+    marginBottom: SPACING['2xl'],
     lineHeight: 24,
-    paddingHorizontal: SPACING.md, // Using design system token
-    fontFamily: Fonts.regular, // Inter Regular from design system
+    paddingRight: SPACING.lg,
+    fontFamily: Fonts.regular,
   },
   formContainer: {
-    marginBottom: 0, // No margin since button is at bottom
+    alignSelf: 'stretch',
+    gap: SPACING['2xl'],
   },
-  formCard: {
-    borderRadius: BORDER_RADIUS.md, // Using design system token
-    padding: SPACING.lg, // Using design system token
-    overflow: 'hidden', // For gradient background
+  inputGroup: {
+    alignSelf: 'stretch',
   },
-  nameInput: {
-    marginBottom: 0, // Remove margin since wrapper handles it
-  },
-  usernameInput: {
-    marginBottom: 0, // Remove margin since wrapper handles it
-  },
-  dateInput: {
-    marginBottom: 0, // Remove margin since wrapper handles it
-  },
-  dateInputContainer: {
-    marginTop: SPACING.md, // Using design system token
-  },
-  dateInputLabel: {
-    fontSize: 14, // Small text size from design system
-    color: '#6B7280', // Secondary text color from design system
-    marginBottom: SPACING.sm, // Using design system token
+  inputLabel: {
+    fontSize: 14,
+    color: '#6B7280',
+    textAlign: 'left',
+    marginBottom: SPACING.xs,
+    fontFamily: Fonts.semiBold,
     fontWeight: '500',
-    fontFamily: Fonts.regular, // Inter Regular from design system
+    letterSpacing: 0.2,
   },
-  dateInputFields: {
+  inputField: {
+    fontSize: 20,
+    color: '#1B1B3A',
+    fontFamily: Fonts.semiBold,
+    paddingVertical: SPACING.xs,
+  },
+  inputUnderline: {
+    height: 2,
+    backgroundColor: '#E5E7EB',
+    borderRadius: 1,
+  },
+  inputUnderlineActive: {
+    backgroundColor: '#c3b1e1',
+  },
+  errorText: {
+    marginTop: SPACING.sm,
+    color: '#EF4444',
+    fontSize: 14,
+    fontFamily: Fonts.semiBold,
+  },
+  helperText: {
+    marginTop: SPACING.sm,
+    color: '#6B7280',
+    fontSize: 13,
+    fontFamily: Fonts.regular,
+  },
+  suggestionsContainer: {
+    marginTop: SPACING.md,
+    gap: SPACING.xs,
+  },
+  suggestionsTitle: {
+    fontSize: 14,
+    color: '#6B7280',
+    fontFamily: Fonts.semiBold,
+  },
+  suggestionsRow: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: SPACING.sm, // Using design system token
+    flexWrap: 'wrap',
+    gap: SPACING.sm,
   },
-  dateField: {
-    width: 60,
-    height: 50,
-    borderBottomWidth: 2,
-    borderBottomColor: '#E5E7EB', // Light border color
-    backgroundColor: 'transparent',
-    fontSize: 18, // Large text for visibility
-    color: '#1B1B3A', // Primary text color
-    fontWeight: '600',
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+  suggestionPill: {
+    paddingVertical: SPACING.xs,
+    paddingHorizontal: SPACING.sm,
+    borderRadius: 999,
+    backgroundColor: '#F3F4F6',
+    borderWidth: 1,
+    borderColor: '#E5E7EB',
   },
-  dateSeparator: {
-    fontSize: 18,
-    color: '#6B7280', // Secondary text color
-    fontWeight: '500',
-    fontFamily: Fonts.medium, // Poppins Medium from design system
+  suggestionText: {
+    fontSize: 14,
+    color: '#FF4F81',
+    fontFamily: Fonts.semiBold,
   },
-  footerContainer: {
-    backgroundColor: '#FFFFFF', // White background
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB', // Light border color
-    paddingTop: SPACING.lg, // Consistent with design system grid
-    paddingBottom: SPACING.md, // Consistent bottom padding
-  },
-  buttonContainer: {
-    paddingHorizontal: SPACING.xl, // Using design system token (32px)
-    paddingBottom: SPACING.sm, // Minimal bottom padding
+  floatingButtonContainer: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: SPACING.lg,
+    paddingHorizontal: SPACING.xl,
   },
   continueButton: {
-    backgroundColor: '#FF4F81', // Primary pink from design system
-    paddingVertical: 18, // From design system primary button spec
-    paddingHorizontal: SPACING.xl, // Using design system token (32px)
-    borderRadius: 16, // From design system primary button spec
+    backgroundColor: '#FF4F81',
+    paddingVertical: 18,
+    paddingHorizontal: SPACING.xl,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 56, // From design system primary button spec
+    minHeight: 56,
+    width: '100%',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
@@ -738,114 +810,104 @@ const styles = StyleSheet.create({
     }),
   },
   continueButtonText: {
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
-    fontWeight: '600', // SemiBold weight from design system
-    fontSize: 18, // From design system primary button spec
-    color: '#FFFFFF', // White text from design system
-    letterSpacing: 0.5, // From design system primary button spec
+    fontFamily: Fonts.semiBold,
+    fontWeight: '600',
+    fontSize: 18,
+    color: '#FFFFFF',
+    letterSpacing: 0.5,
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
   disabledButton: {
-    opacity: 0.5, // Reduced opacity for disabled state
+    opacity: 0.5,
   },
   disabledButtonText: {
-    opacity: 0.7, // Slightly more visible text when disabled
+    opacity: 0.7,
   },
-  suggestionsContainer: {
-    marginTop: SPACING.sm, // Using design system token
-    paddingHorizontal: 4,
+  usernamePopupContainer: {
+    position: 'absolute',
+    top: 140,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+    zIndex: 1000,
   },
-  suggestionsTitle: {
-    fontSize: 14, // Small text size from design system
-    color: '#6B7280', // Secondary text color from design system
-    marginBottom: SPACING.sm, // Using design system token
-    fontWeight: '500',
-    fontFamily: Fonts.regular, // Inter Regular from design system
+  usernamePopupContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.lg,
+    borderRadius: 20,
+    borderWidth: 2,
+    borderColor: '#FF4F81',
+    ...Platform.select({
+      ios: {
+        shadowColor: '#FF4F81',
+        shadowOffset: { width: 0, height: 8 },
+        shadowOpacity: 0.25,
+        shadowRadius: 16,
+      },
+      android: {
+        elevation: 12,
+        shadowColor: '#FF4F81',
+      },
+    }),
   },
-  suggestionButton: {
-    backgroundColor: '#F3F4F6', // Light gray background
-    paddingHorizontal: SPACING.sm, // Using design system token
-    paddingVertical: SPACING.sm, // Using design system token
-    borderRadius: BORDER_RADIUS.sm, // Using design system token
-    marginBottom: 4,
-    borderWidth: 1,
-    borderColor: '#E5E7EB', // Light border color
+  usernamePopupIcon: {
+    fontSize: 24,
+    marginRight: SPACING.md,
   },
-  suggestionText: {
-    fontSize: 14, // Small text size from design system
-    color: '#FF4F81', // Primary pink from design system
-    fontWeight: '500',
-    fontFamily: Fonts.medium, // Poppins Medium from design system
+  usernamePopupText: {
+    color: '#FF4F81',
+    fontSize: 18,
+    fontFamily: Fonts.semiBold,
+    fontWeight: '600',
   },
-  ageModal: {
+  confettiContainer: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 1000,
-  },
-  ageModalContent: {
-    backgroundColor: '#FFFFFF', // Primary white background from design system
-    borderRadius: 20,
-    padding: SPACING.xl, // Using design system token
-    width: '85%',
-    maxWidth: 400,
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.1,
-    shadowRadius: 18,
-    elevation: 10,
-    alignItems: 'center',
-  },
-  ageModalIcon: {
-    marginBottom: SPACING.lg, // Using design system token
-  },
-  ageModalTitle: {
-    fontSize: 20, // Large title size
-    fontWeight: '700', // Bold weight
-    color: '#1B1B3A', // Primary text color
-    textAlign: 'center',
-    marginBottom: SPACING.md, // Using design system token
-    fontFamily: Fonts.bold, // Poppins Bold from design system
-  },
-  ageModalMessage: {
-    fontSize: 16, // Body text size
-    color: '#6B7280', // Secondary text color
-    textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: SPACING.xl, // Using design system token
-    fontFamily: Fonts.regular, // Inter Regular from design system
-  },
-  ageModalButtons: {
-    flexDirection: 'row',
-    gap: SPACING.md, // Using design system token
-    width: '100%',
-  },
-  ageModalButton: {
-    flex: 1,
-    paddingVertical: SPACING.md, // Using design system token
-    paddingHorizontal: SPACING.lg, // Using design system token
-    borderRadius: BORDER_RADIUS.md, // Using design system token
-    borderWidth: 1,
-    borderColor: '#E5E7EB', // Light border color
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFFFF', // White background
+    zIndex: 999,
   },
-  ageModalButtonPrimary: {
-    backgroundColor: '#FF4F81', // Primary pink from design system
-    borderColor: '#FF4F81', // Primary pink from design system
+  confettiPiece: {
+    position: 'absolute',
   },
-  ageModalButtonText: {
-    fontSize: 16, // Body text size
-    fontWeight: '600',
-    color: '#6B7280', // Secondary text color
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+  confettiBit: {
+    width: 8,
+    height: 8,
   },
-  ageModalButtonTextPrimary: {
-    color: '#FFFFFF', // White text for primary button
+  confettiRectangle: {
+    width: 12,
+    height: 6,
+    borderRadius: 1,
+  },
+  confettiCircle: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  confettiTriangle: {
+    width: 0,
+    height: 0,
+    backgroundColor: 'transparent',
+    borderStyle: 'solid',
+    borderLeftWidth: 5,
+    borderRightWidth: 5,
+    borderBottomWidth: 10,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
   },
 });

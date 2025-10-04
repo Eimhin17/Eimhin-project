@@ -1,14 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, ScrollView, Switch, Alert, Share } from 'react-native';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, ScrollView, Switch, Alert, Share, Animated } from 'react-native';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
 import { useUser } from '../contexts/UserContext';
 import { useAuth } from '../contexts/AuthContext';
-import { NotificationService } from '../services/notifications';
 import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import { BackButton } from '../components/ui';
+import { playLightHaptic } from '../utils/haptics';
 import PrivacyPolicyModal from '../components/PrivacyPolicyModal';
 import TermsOfServiceModal from '../components/TermsOfServiceModal';
 import LicensesModal from '../components/LicensesModal';
@@ -24,7 +24,7 @@ export default function SettingsScreen() {
   const { signOut, deleteAccount } = useAuth();
   const [darkMode, setDarkMode] = useState('system');
   const [emailNotifications, setEmailNotifications] = useState(true);
-  const [pushNotifications, setPushNotifications] = useState(false);
+  // Push notifications removed
   const [showPrivacyPolicy, setShowPrivacyPolicy] = useState(false);
   const [showTermsOfService, setShowTermsOfService] = useState(false);
   const [showLicenses, setShowLicenses] = useState(false);
@@ -35,24 +35,26 @@ export default function SettingsScreen() {
   const [showDataUsage, setShowDataUsage] = useState(false);
   const [showDeleteAccount, setShowDeleteAccount] = useState(false);
 
-  // Load notification status on mount
-  useEffect(() => {
-    loadNotificationStatus();
-  }, []);
+  // Back button animation values (match onboarding feel)
+  const backButtonScale = React.useRef(new Animated.Value(1)).current;
+  const backButtonOpacity = React.useRef(new Animated.Value(1)).current;
 
-  const loadNotificationStatus = async () => {
-    try {
-      const isEnabled = await NotificationService.areNotificationsEnabled();
-      setPushNotifications(isEnabled);
-      
-      // Also load from user profile if available
-      if (userProfile?.pushNotificationsEnabled !== undefined) {
-        setPushNotifications(userProfile.pushNotificationsEnabled);
-      }
-    } catch (error) {
-      console.error('Error loading notification status:', error);
-    }
+  const handleBackPress = () => {
+    playLightHaptic();
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, { toValue: 0.85, duration: 90, useNativeDriver: true }),
+      Animated.timing(backButtonScale, { toValue: 0.92, duration: 90, useNativeDriver: true }),
+    ]).start(() => {
+      Animated.parallel([
+        Animated.timing(backButtonOpacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+        Animated.timing(backButtonScale, { toValue: 1, duration: 140, useNativeDriver: true }),
+      ]).start(() => {
+        router.push('/profile');
+      });
+    });
   };
+
+  // Push notifications removed
 
   const handleSignOut = async () => {
     Alert.alert(
@@ -149,59 +151,7 @@ export default function SettingsScreen() {
     setShowDataUsage(true);
   };
 
-  const handlePushNotificationToggle = async (enabled: boolean) => {
-    if (enabled) {
-      // Request notification permissions
-      const permissionResult = await NotificationService.requestPermissions();
-      
-      if (permissionResult.granted) {
-        console.log('✅ Push notification permissions granted');
-        setPushNotifications(true);
-        
-        // Update user profile
-        await updateUserProfile({ pushNotificationsEnabled: true });
-        
-        // Schedule test notification
-        await NotificationService.scheduleTestNotification();
-      } else {
-        console.log('❌ Push notification permissions denied');
-        
-        if (permissionResult.canAskAgain) {
-          Alert.alert(
-            'Enable Notifications',
-            'To receive push notifications, please allow notifications for DebsMatch in your device settings.',
-            [
-              { text: 'Cancel', style: 'cancel' },
-              { 
-                text: 'Open Settings', 
-                onPress: async () => {
-                  await NotificationService.openNotificationSettings();
-                }
-              }
-            ]
-          );
-        } else {
-          Alert.alert(
-            'Notifications Disabled',
-            'Notifications are currently disabled. To enable them, go to Settings > Notifications > DebsMatch and turn them on.',
-            [
-              { text: 'OK' },
-              { 
-                text: 'Open Settings', 
-                onPress: async () => {
-                  await NotificationService.openNotificationSettings();
-                }
-              }
-            ]
-          );
-        }
-      }
-    } else {
-      // Disable notifications
-      setPushNotifications(false);
-      await updateUserProfile({ pushNotificationsEnabled: false });
-    }
-  };
+  // Push notifications removed
 
   const handleEmailNotificationToggle = async (enabled: boolean) => {
     setEmailNotifications(enabled);
@@ -240,8 +190,12 @@ export default function SettingsScreen() {
     <SafeAreaView style={styles.container}>
       {/* Header */}
       <View style={styles.header}>
-        <BackButton onPress={() => router.back()} />
-        <View style={styles.headerCenter}>
+        <View style={styles.backButtonWrapper}>
+          <Animated.View style={{ transform: [{ scale: backButtonScale }], opacity: backButtonOpacity }}>
+            <BackButton onPress={handleBackPress} />
+          </Animated.View>
+        </View>
+        <View style={styles.headerCenter} pointerEvents="none">
           <Text style={styles.headerTitle}>Settings</Text>
         </View>
         <View style={styles.headerRight} />
@@ -321,36 +275,7 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Notifications */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Notifications</Text>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingLeft}>
-              <Ionicons name="mail" size={20} color="#FF4F81" />
-              <Text style={styles.settingLabel}>Email</Text>
-            </View>
-            <Switch
-              value={emailNotifications}
-              onValueChange={handleEmailNotificationToggle}
-              trackColor={{ false: '#E5E7EB', true: '#FF4F81' }}
-              thumbColor="#FFFFFF"
-            />
-          </View>
-
-          <View style={styles.settingItem}>
-            <View style={styles.settingLeft}>
-              <Ionicons name="notifications" size={20} color="#FF4F81" />
-              <Text style={styles.settingLabel}>Push Notifications</Text>
-            </View>
-            <Switch
-              value={pushNotifications}
-              onValueChange={handlePushNotificationToggle}
-              trackColor={{ false: '#E5E7EB', true: '#FF4F81' }}
-              thumbColor="#FFFFFF"
-            />
-          </View>
-        </View>
+        {/* Notifications removed */}
 
         {/* Dark Mode */}
         <View style={styles.section}>
@@ -578,10 +503,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-    backgroundColor: '#FFFFFF',
+    borderBottomWidth: 0,
+    backgroundColor: '#FAFAFA',
     minHeight: 60,
+  },
+  backButtonWrapper: {
+    zIndex: 2,
+    width: 72,
+    marginLeft: -SPACING.lg,
   },
   headerCenter: {
     position: 'absolute',

@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase';
 import { Inserts } from '../lib/supabase';
+import { sendPushNotification } from './notifications';
 
 export interface Swipe {
   id: string;
@@ -35,7 +36,7 @@ export class MatchingService {
   static async recordSwipe(swiperId: string, swipedUserId: string, direction: 'left' | 'right'): Promise<{ swipe: Swipe | null; error: string | null }> {
     try {
       console.log('🔄 Recording swipe:', { swiperId, swipedUserId, direction });
-      
+
       const { data, error } = await supabase
         .from('swipes')
         .insert({
@@ -46,9 +47,15 @@ export class MatchingService {
         .select()
         .single();
 
-      if (error) {
+      // Ignore duplicate swipe errors (code 23505) - users can swipe on each other multiple times
+      if (error && error.code !== '23505') {
         console.error('❌ Error recording swipe:', error);
         return { swipe: null, error: error.message };
+      }
+
+      if (error && error.code === '23505') {
+        console.log('✅ Swipe already recorded (duplicate ignored)');
+        return { swipe: null, error: null };
       }
 
       console.log('✅ Swipe recorded successfully:', data);
@@ -64,12 +71,15 @@ export class MatchingService {
   static async getPassedUsers(userId: string): Promise<string[]> {
     try {
       console.log('🔄 Fetching passed users for:', userId);
-      
+      // Beta behavior: only exclude passes from the last 3 hours
+      const threeHoursAgoIso = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+
       const { data, error } = await supabase
         .from('swipes')
         .select('swiped_user_id')
         .eq('swiper_id', userId)
-        .eq('direction', 'left');
+        .eq('direction', 'left')
+        .gte('created_at', threeHoursAgoIso);
 
       if (error) {
         console.error('❌ Error fetching passed users:', error);
@@ -89,20 +99,7 @@ export class MatchingService {
   // Create a like when user swipes right
   static async createLike(likerId: string, likedUserId: string): Promise<void> {
     try {
-      // Check if like already exists to avoid duplicates
-      const { data: existingLike, error: checkError } = await supabase
-        .from('likes')
-        .select('id')
-        .eq('liker_id', likerId)
-        .eq('liked_user_id', likedUserId)
-        .single();
-
-      if (existingLike) {
-        console.log('Like already exists, skipping creation');
-        return;
-      }
-
-      // Create the like
+      // Create the like; allow duplicates by treating constraint violation as success
       const { error } = await supabase
         .from('likes')
         .insert({
@@ -110,11 +107,12 @@ export class MatchingService {
           liked_user_id: likedUserId,
         });
 
-      if (error) {
+      if (error && (error as any).code !== '23505') {
         console.error('Error creating like:', error);
-      } else {
-        console.log('✅ Like created successfully');
+        return;
       }
+
+      console.log('✅ Like recorded (new or existing)');
     } catch (error) {
       console.error('Error creating like:', error);
     }
@@ -183,6 +181,44 @@ export class MatchingService {
       }
 
       console.log('✅ Match created successfully:', data);
+
+      // Send push notifications to both users
+      try {
+        // Get both users' profiles for notifications
+        const { data: profiles } = await supabase
+          .from('profiles')
+          .select('id, first_name')
+          .in('id', [user1Id, user2Id]);
+
+        if (profiles && profiles.length === 2) {
+          const user1Profile = profiles.find(p => p.id === user1Id);
+          const user2Profile = profiles.find(p => p.id === user2Id);
+
+          // Send notification to user1
+          if (user2Profile) {
+            await sendPushNotification(
+              user1Id,
+              '🎉 It\'s a Match!',
+              `You and ${user2Profile.first_name} matched!`,
+              { type: 'new_match', match_id: data.id, other_user_id: user2Id }
+            );
+          }
+
+          // Send notification to user2
+          if (user1Profile) {
+            await sendPushNotification(
+              user2Id,
+              '🎉 It\'s a Match!',
+              `You and ${user1Profile.first_name} matched!`,
+              { type: 'new_match', match_id: data.id, other_user_id: user1Id }
+            );
+          }
+        }
+      } catch (notifError) {
+        console.error('Error sending match notifications:', notifError);
+        // Don't fail the match creation if notification fails
+      }
+
       return { match: data, error: null };
     } catch (error) {
       console.error('Error creating match:', error);
@@ -235,7 +271,7 @@ export class MatchingService {
         userIds.add(match.user2_id);
       });
 
-      // Fetch user details
+      // Fetch user details (only completed profiles)
       const { data: users, error: usersError } = await supabase
         .from('profiles')
         .select(`
@@ -245,10 +281,13 @@ export class MatchingService {
           date_of_birth,
           bio,
           relationship_status,
+          profile_completed,
           schools (school_name),
           user_photos (photo_url, is_primary)
         `)
-        .in('id', Array.from(userIds));
+        .in('id', Array.from(userIds))
+        .eq('profile_completed', true)
+        .eq('status', 'active');
 
       if (usersError) {
         return { matches: null, error: usersError.message };

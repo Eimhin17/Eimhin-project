@@ -10,54 +10,50 @@ import {
   Modal,
   TextInput,
   Animated,
-  ScrollView,
+  Easing,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { PanGestureHandler, State } from 'react-native-gesture-handler';
 // import { BlurView } from 'expo-blur';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 // import { ViewShot } from 'react-native-view-shot';
-import { Button } from '../../components/ui';
+import { Button, BackButton } from '../../components/ui';
 import { useFilters } from '../../contexts/FilterContext';
 import { useMatchCreation } from '../../hooks/useMatchCreation';
 import { RealUserService, RealUserProfile } from '../../services/realUsers';
 import { MatchingService } from '../../services/matching';
 import ReportProfileModal from '../../components/ReportProfileModal';
 import { useUser } from '../../contexts/UserContext';
+import { useMatchNotification } from '../../contexts/MatchNotificationContext';
 import ScrollableProfileCard, { ProfileData } from '../../components/ScrollableProfileCard';
+import { CardRevealAnimation } from '../../components/animations/CardRevealAnimation';
+import { TinderCardStack } from '../../components/TinderCardStack';
 import { ReportService } from '../../services/reports';
 import { ScreenshotService } from '../../services/screenshot';
 import { LikesService } from '../../services/likes';
 import { captureRef } from 'react-native-view-shot';
 import { useCustomFonts, Fonts } from '../../utils/fonts';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
+import { shuffleArray } from '../../utils/shuffleArray';
 import * as Haptics from 'expo-haptics';
 import { profilePreloader } from '../../services/profilePreloader';
+import { attachProgressHaptics, playLightHaptic, playJoyfulButtonPressHaptic, playLikeSwipeSuccessHaptic, playDislikeSwipeSuccessHaptic, playMatchCelebrationHaptic } from '../../utils/haptics';
+import { FiltersAppliedPopup } from '../../components/FiltersAppliedPopup';
+import { useTabPreloader } from '../../hooks/useTabPreloader';
 
 const { width, height } = Dimensions.get('window');
-const SWIPE_THRESHOLD = width * 0.25;
-
-// Haptic feedback thresholds for gradual intensity (more levels for smoother progression)
-const HAPTIC_THRESHOLDS = {
-  VERY_LIGHT: width * 0.05,   // 5% of screen width
-  LIGHT: width * 0.1,         // 10% of screen width
-  LIGHT_MEDIUM: width * 0.15, // 15% of screen width
-  MEDIUM: width * 0.2,        // 20% of screen width
-  MEDIUM_STRONG: width * 0.25, // 25% of screen width
-  STRONG: width * 0.3,        // 30% of screen width
-  STRONG_INTENSE: width * 0.35, // 35% of screen width
-  INTENSE: width * 0.4,       // 40% of screen width
-  VERY_INTENSE: width * 0.45, // 45% of screen width
-  MAXIMUM: width * 0.5,       // 50% of screen width
-};
 
 export default function HomeScreen() {
   const fontsLoaded = useCustomFonts();
-  const { filters, resetFilters } = useFilters();
+  const { filters, resetFilters, showFiltersAppliedPopup, setShowFiltersAppliedPopup, getActiveFiltersCount } = useFilters();
   const { checkAndCreateMatch } = useMatchCreation();
-  
+  const matchNotificationContext = useMatchNotification();
+
+  // Preload adjacent tab data
+  useTabPreloader({ currentTab: 'index' });
+
   // Debug: Check if function exists
   console.log('🔍 checkAndCreateMatch in component:', typeof checkAndCreateMatch);
   const { userProfile } = useUser();
@@ -69,23 +65,102 @@ export default function HomeScreen() {
 
   // Only real user profiles
   const [allProfiles, setAllProfiles] = useState<UnifiedProfile[]>([]);
-  const [realUserProfiles, setRealUserProfiles] = useState<RealUserProfile[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(false); // Changed to false for immediate UI
   
   const [currentUserIndex, setCurrentUserIndex] = useState(0);
   const [likedUsers, setLikedUsers] = useState<string[]>([]);
   const [passedUsers, setPassedUsers] = useState<string[]>([]);
+  const [isReviewMode, setIsReviewMode] = useState(false); // Indicates user is reviewing passed profiles
+  const [reviewedProfilesInSession, setReviewedProfilesInSession] = useState<string[]>([]); // Track profiles swiped during review session
+  const [showReviewPrompt, setShowReviewPrompt] = useState(false); // Show popup asking to review profiles
+  const [promptShownOnce, setPromptShownOnce] = useState(false); // Track if we've shown the prompt for this empty state
+
+  // Review prompt animation values
+  const reviewPromptScale = useRef(new Animated.Value(0.8)).current;
+  const reviewPromptOpacity = useRef(new Animated.Value(0)).current;
+
   const [showMatchNotification, setShowMatchNotification] = useState(false);
   const [matchedUser, setMatchedUser] = useState<any>(null);
   const [matchId, setMatchId] = useState<string | null>(null);
+
+  // Match animation values - use context's matchOverlayOpacity for footer sync
+  const matchOverlayOpacity = matchNotificationContext.matchOverlayOpacity;
+  const matchScale = useRef(new Animated.Value(0.3)).current;
+  const matchHeartScale = useRef(new Animated.Value(0)).current;
+  const matchSparkle1Rotation = useRef(new Animated.Value(0)).current;
+  const matchSparkle2Rotation = useRef(new Animated.Value(0)).current;
+  const matchProfile1Scale = useRef(new Animated.Value(0.5)).current;
+  const matchProfile2Scale = useRef(new Animated.Value(0.5)).current;
+  const matchGlowPulse = useRef(new Animated.Value(1)).current;
   const [reportedUsers, setReportedUsers] = useState<string[]>([]);
   const [showCustomReportModal, setShowCustomReportModal] = useState(false);
   const [customReportReason, setCustomReportReason] = useState('');
   const [showReportModal, setShowReportModal] = useState(false);
-  
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // ============================================================================
+  // STABLE DISPLAY BUFFER PATTERN
+  // ============================================================================
+  // This pattern solves the "idle state flash" and "disappearing card" problems.
+  //
+  // The Problem:
+  // - Cards animate over 300ms but React state updates instantly
+  // - Updating filteredUsers immediately causes array to shift during animation
+  // - TinderCardStack's index-based system breaks when array changes mid-animation
+  //
+  // The Solution:
+  // - Maintain a separate "display buffer" that TinderCardStack renders from
+  // - Only update the display buffer AFTER animations complete
+  // - This keeps the array and indices stable during animation
+  // ============================================================================
+  const [displayProfiles, setDisplayProfiles] = useState<UnifiedProfile[]>([]);
+  const pendingSwipes = useRef<Map<string, 'left' | 'right'>>(new Map());
+
   // Sidebar state
   const [showSidebar, setShowSidebar] = useState(false);
   const [lookingForPreference, setLookingForPreference] = useState<'dates' | 'friends' | 'both'>('both');
+
+  // Sidebar animation
+  const sidebarTranslateX = useRef(new Animated.Value(-width * 0.8)).current;
+  const sidebarOpacity = useRef(new Animated.Value(0)).current;
+
+  // Back button animation (matching onboarding pattern)
+  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const backButtonOpacity = useRef(new Animated.Value(1)).current;
+
+  // Button selection animations (matching onboarding looking-for page)
+  const buttonAnimValue = useRef(new Animated.Value(0)).current;
+  const buttonScaleValue = useRef(new Animated.Value(1)).current;
+  const [animatingButton, setAnimatingButton] = useState<string | null>(null);
+
+  // Filter button animation
+  const filterButtonScale = useRef(new Animated.Value(1)).current;
+
+  // Idle image fade animation - start at 0 for smooth fade-in
+  const idleImageOpacity = useRef(new Animated.Value(0)).current;
+
+  // Animate idle image opacity when cards change
+  useEffect(() => {
+    const length = displayProfiles?.length ?? 0;
+    console.log('🖼️ Idle image animation check - displayProfiles.length:', length);
+
+    if (!displayProfiles || displayProfiles.length === 0) {
+      console.log('🖼️ Fading in idle image');
+      // Fade in idle image smoothly when no cards left
+      Animated.timing(idleImageOpacity, {
+        toValue: 1,
+        duration: 300, // Match card animation duration
+        useNativeDriver: false,
+        easing: Easing.out(Easing.ease),
+      }).start(() => {
+        console.log('🖼️ Idle image fade-in complete');
+      });
+    } else {
+      console.log('🖼️ Hiding idle image');
+      // Instantly hide when cards are present (no fade out needed)
+      idleImageOpacity.setValue(0);
+    }
+  }, [displayProfiles]);
 
   // Load current looking for preference from user profile
   useEffect(() => {
@@ -96,41 +171,14 @@ export default function HomeScreen() {
       }
     }
   }, [userProfile]);
-  
-  const translateX = useRef(new Animated.Value(0)).current;
-  const translateY = useRef(new Animated.Value(0)).current;
-  const rotate = useRef(new Animated.Value(0)).current;
-  const profileCardRef = useRef<any>(null);
-  const lastHapticLevel = useRef<string | null>(null);
 
-  // Function to get haptic intensity based on swipe distance
-  const getHapticIntensity = (translationX: number, direction: 'right' | 'left') => {
-    const absX = Math.abs(translationX);
-    
-    if (absX >= HAPTIC_THRESHOLDS.MAXIMUM) {
-      return { level: 'MAXIMUM', style: Haptics.ImpactFeedbackStyle.Heavy };
-    } else if (absX >= HAPTIC_THRESHOLDS.VERY_INTENSE) {
-      return { level: 'VERY_INTENSE', style: Haptics.ImpactFeedbackStyle.Heavy };
-    } else if (absX >= HAPTIC_THRESHOLDS.INTENSE) {
-      return { level: 'INTENSE', style: Haptics.ImpactFeedbackStyle.Heavy };
-    } else if (absX >= HAPTIC_THRESHOLDS.STRONG_INTENSE) {
-      return { level: 'STRONG_INTENSE', style: Haptics.ImpactFeedbackStyle.Medium };
-    } else if (absX >= HAPTIC_THRESHOLDS.STRONG) {
-      return { level: 'STRONG', style: Haptics.ImpactFeedbackStyle.Medium };
-    } else if (absX >= HAPTIC_THRESHOLDS.MEDIUM_STRONG) {
-      return { level: 'MEDIUM_STRONG', style: Haptics.ImpactFeedbackStyle.Medium };
-    } else if (absX >= HAPTIC_THRESHOLDS.MEDIUM) {
-      return { level: 'MEDIUM', style: Haptics.ImpactFeedbackStyle.Medium };
-    } else if (absX >= HAPTIC_THRESHOLDS.LIGHT_MEDIUM) {
-      return { level: 'LIGHT_MEDIUM', style: Haptics.ImpactFeedbackStyle.Light };
-    } else if (absX >= HAPTIC_THRESHOLDS.LIGHT) {
-      return { level: 'LIGHT', style: Haptics.ImpactFeedbackStyle.Light };
-    } else if (absX >= HAPTIC_THRESHOLDS.VERY_LIGHT) {
-      return { level: 'VERY_LIGHT', style: Haptics.ImpactFeedbackStyle.Light };
-    }
-    
-    return null;
-  };
+  // Sync match notification state with context for footer overlay
+  useEffect(() => {
+    matchNotificationContext.setShowMatchNotification(showMatchNotification);
+  }, [showMatchNotification]);
+
+  const profileCardRef = useRef<any>(null);
+
 
   // Function to transform real user profiles to unified format (without photos initially)
   const transformRealUserToUnified = (realUser: RealUserProfile): UnifiedProfile => {
@@ -237,16 +285,15 @@ export default function HomeScreen() {
     console.log('- userProfile:', userProfile);
     console.log('- likedUsers:', likedUsers);
     console.log('- passedUsers:', passedUsers);
-    
-    setIsLoading(true);
+
+    // Load profiles in background without showing loading state
     try {
       // Check for preloaded profile first
       const preloadedProfile = profilePreloader.getPreloadedProfile();
       if (preloadedProfile) {
         console.log('⚡ Using preloaded profile:', preloadedProfile.name);
         setAllProfiles([preloadedProfile]);
-        setIsLoading(false);
-        
+
         // Load remaining profiles in background
         loadRemainingProfiles();
         return;
@@ -256,12 +303,15 @@ export default function HomeScreen() {
       const currentUserId = userProfile?.id || 'default-user-id';
       console.log('- Using currentUserId:', currentUserId);
       
-      // Fetch passed users from database
+      // Fetch passed users from database and update local state
       const passedUserIds = await MatchingService.getPassedUsers(currentUserId);
       console.log('- Fetched passed users from DB:', passedUserIds);
-      
+
+      // Update local state to match database
+      setPassedUsers(passedUserIds);
+
       const result = await RealUserService.getUserProfilesForSwiping(
-        currentUserId, 
+        currentUserId,
         [...likedUsers, ...passedUserIds]
       );
       
@@ -270,24 +320,23 @@ export default function HomeScreen() {
       if (result.success && result.profiles) {
         console.log('- Setting real user profiles:', result.profiles.length);
         console.log('- Raw profiles data:', result.profiles);
-        setRealUserProfiles(result.profiles);
-        
         try {
           // Transform real users to unified format (synchronous now)
           console.log('- Transforming profiles...');
           const transformedRealUsers = result.profiles.map(transformRealUserToUnified);
+          const shuffledRealUsers = shuffleArray(transformedRealUsers);
           
-          console.log('- Transformed profiles:', transformedRealUsers.length);
-          console.log('- Transformed profiles data:', transformedRealUsers);
+          console.log('- Transformed profiles:', shuffledRealUsers.length);
+          console.log('- Transformed profiles data:', shuffledRealUsers);
           
           // Only use real user profiles
-          setAllProfiles(transformedRealUsers);
+          setAllProfiles(shuffledRealUsers);
           
-          console.log(`✅ Loaded ${transformedRealUsers.length} real user profiles`);
-          console.log('- allProfiles state after setAllProfiles:', transformedRealUsers);
+          console.log(`✅ Loaded ${shuffledRealUsers.length} real user profiles`);
+          console.log('- allProfiles state after setAllProfiles:', shuffledRealUsers);
           
           // Load photos asynchronously for better performance
-          loadPhotosAsync(transformedRealUsers);
+          loadPhotosAsync(shuffledRealUsers);
         } catch (error) {
           console.error('Error transforming real user profiles:', error);
           setAllProfiles([]);
@@ -301,9 +350,8 @@ export default function HomeScreen() {
       console.error('Error fetching real user profiles:', error);
       setAllProfiles([]);
       console.log('❌ Error occurred, no profiles loaded');
-    } finally {
-      setIsLoading(false);
     }
+    // Removed finally block with setIsLoading(false) for seamless experience
   };
 
   // Function to load remaining profiles in background after using preloaded one
@@ -311,16 +359,20 @@ export default function HomeScreen() {
     try {
       const currentUserId = userProfile?.id || 'default-user-id';
       const passedUserIds = await MatchingService.getPassedUsers(currentUserId);
-      
+
+      // Update local state to match database
+      setPassedUsers(passedUserIds);
+
       const result = await RealUserService.getUserProfilesForSwiping(
-        currentUserId, 
+        currentUserId,
         [...likedUsers, ...passedUserIds]
       );
       
       if (result.success && result.profiles) {
         const transformedRealUsers = result.profiles.map(transformRealUserToUnified);
-        setAllProfiles(transformedRealUsers);
-        loadPhotosAsync(transformedRealUsers);
+        const shuffledRealUsers = shuffleArray(transformedRealUsers);
+        setAllProfiles(shuffledRealUsers);
+        loadPhotosAsync(shuffledRealUsers);
       }
     } catch (error) {
       console.error('Error loading remaining profiles:', error);
@@ -330,13 +382,30 @@ export default function HomeScreen() {
   // Function to load photos asynchronously for better performance
   const loadPhotosAsync = async (profiles: UnifiedProfile[]) => {
     console.log('🖼️ Loading photos asynchronously for', profiles.length, 'profiles');
-    
-    // Load photos in batches to avoid overwhelming the API
+
+    if (profiles.length === 0) return;
+
+    // 1) Prioritize first visible profile for instant display
+    try {
+      const first = profiles[0];
+      const firstPhotos = await RealUserService.getUserPhotos(first.id);
+      if (firstPhotos.success && firstPhotos.photos) {
+        // Prefetch first 1-2 photos to disk cache
+        try {
+          await Image.prefetch(firstPhotos.photos.slice(0, 2), { cachePolicy: 'disk' });
+        } catch {}
+        setAllProfiles(prev => prev.map(p => p.id === first.id ? { ...p, photos: firstPhotos.photos! } : p));
+      }
+    } catch (e) {
+      console.error('❌ Error fetching first profile photos:', e);
+    }
+
+    // 2) Load remaining photos in small batches
     const batchSize = 5;
-    for (let i = 0; i < profiles.length; i += batchSize) {
-      const batch = profiles.slice(i, i + batchSize);
-      
-      // Load photos for this batch in parallel
+    const remaining = profiles.slice(1);
+    for (let i = 0; i < remaining.length; i += batchSize) {
+      const batch = remaining.slice(i, i + batchSize);
+
       const photoPromises = batch.map(async (profile) => {
         try {
           const photosResult = await RealUserService.getUserPhotos(profile.id);
@@ -349,10 +418,9 @@ export default function HomeScreen() {
           return { profileId: profile.id, photos: [] };
         }
       });
-      
+
       const photoResults = await Promise.all(photoPromises);
-      
-      // Update profiles with photos
+
       setAllProfiles(prevProfiles => 
         prevProfiles.map(profile => {
           const photoResult = photoResults.find(r => r.profileId === profile.id);
@@ -362,22 +430,149 @@ export default function HomeScreen() {
           return profile;
         })
       );
-      
-      // Small delay between batches to avoid overwhelming the API
-      if (i + batchSize < profiles.length) {
+
+      if (i + batchSize < remaining.length) {
         await new Promise(resolve => setTimeout(resolve, 100));
       }
     }
-    
+
     console.log('✅ Finished loading photos asynchronously');
   };
 
-  // Fetch real user profiles on component mount
+  const handlePullToRefresh = () => {
+    if (isRefreshing) {
+      return;
+    }
+
+    setIsRefreshing(true);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    setAllProfiles(prevProfiles => shuffleArray(prevProfiles));
+    setCurrentUserIndex(0);
+
+    setTimeout(() => {
+      setIsRefreshing(false);
+    }, 400);
+  };
+
+  // Animate review prompt in with bounce
+  const animateReviewPromptIn = () => {
+    // Play haptic feedback
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+    // Reset animation values
+    reviewPromptScale.setValue(0.8);
+    reviewPromptOpacity.setValue(0);
+
+    // Animate in with bounce
+    Animated.parallel([
+      Animated.spring(reviewPromptScale, {
+        toValue: 1,
+        useNativeDriver: true,
+        tension: 100,
+        friction: 8,
+      }),
+      Animated.timing(reviewPromptOpacity, {
+        toValue: 1,
+        duration: 300,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  };
+
+  // Animate review prompt out
+  const animateReviewPromptOut = (callback?: () => void) => {
+    Animated.parallel([
+      Animated.timing(reviewPromptScale, {
+        toValue: 0.8,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+      Animated.timing(reviewPromptOpacity, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      setShowReviewPrompt(false);
+      if (callback) callback();
+    });
+  };
+
+  // Animate match notification in with epic celebration
+  const animateMatchNotificationIn = () => {
+    // Play mega haptic celebration
+    playMatchCelebrationHaptic();
+
+    // Reset all animation values
+    matchOverlayOpacity.setValue(0);
+    matchScale.setValue(0.3);
+    matchHeartScale.setValue(0);
+    matchSparkle1Rotation.setValue(0);
+    matchSparkle2Rotation.setValue(0);
+    matchProfile1Scale.setValue(0.5);
+    matchProfile2Scale.setValue(0.5);
+    matchGlowPulse.setValue(1);
+
+    // Sequence of delightful animations
+    Animated.sequence([
+      // 1. Fade in overlay with explosive entrance and profile pictures together
+      Animated.parallel([
+        Animated.timing(matchOverlayOpacity, {
+          toValue: 1,
+          duration: 300,
+          useNativeDriver: true,
+        }),
+        Animated.spring(matchScale, {
+          toValue: 1,
+          tension: 50,
+          friction: 7,
+          useNativeDriver: true,
+        }),
+        // Bounce profile pictures in immediately
+        Animated.stagger(150, [
+          Animated.spring(matchProfile1Scale, {
+            toValue: 1,
+            tension: 100,
+            friction: 8,
+            useNativeDriver: true,
+          }),
+          Animated.spring(matchProfile2Scale, {
+            toValue: 1,
+            tension: 100,
+            friction: 8,
+            useNativeDriver: true,
+          }),
+        ]),
+      ]),
+    ]).start();
+
+    // Continuous glow pulse animation
+    Animated.loop(
+      Animated.sequence([
+        Animated.timing(matchGlowPulse, {
+          toValue: 1.3,
+          duration: 1000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+        Animated.timing(matchGlowPulse, {
+          toValue: 1,
+          duration: 1000,
+          easing: Easing.inOut(Easing.ease),
+          useNativeDriver: true,
+        }),
+      ])
+    ).start();
+  };
+
+  // Fetch real user profiles on component mount only
+  // refreshProfiles now also loads swipe history from DB to prevent re-showing swiped profiles
   useEffect(() => {
     refreshProfiles();
     // Ensure reports storage bucket exists
     ScreenshotService.ensureReportsBucket();
-  }, [likedUsers, passedUsers]);
+  }, []); // Only run once on mount - don't refetch on swipe changes
 
   // Filter profiles based on active filters
   const filteredUsers = useMemo(() => {
@@ -387,13 +582,33 @@ export default function HomeScreen() {
     console.log('- filters:', filters);
     console.log('- likedUsers:', likedUsers);
     console.log('- passedUsers:', passedUsers);
-    
+    console.log('- reviewMode:', isReviewMode);
+
+    // Don't filter if we're still loading profiles
+    if (allProfiles.length === 0) {
+      console.log('⚠️ No profiles to filter yet, returning empty array');
+      return [];
+    }
+
     const filtered = allProfiles.filter(user => {
       console.log(`🔍 Filtering user: ${user.name} (${user.gender})`);
-      
-      // Skip users that have already been liked or passed
-      if (likedUsers.includes(user.id) || passedUsers.includes(user.id)) {
-        console.log(`❌ Filtered out - already swiped: ${user.name} (liked: ${likedUsers.includes(user.id)}, passed: ${passedUsers.includes(user.id)})`);
+
+      // Always skip liked users (preserves match integrity)
+      if (likedUsers.includes(user.id)) {
+        console.log(`❌ Filtered out - already liked: ${user.name}`);
+        return false;
+      }
+
+      // In review mode, INCLUDE passed users (allow re-swiping)
+      // But EXCLUDE profiles already reviewed in this session
+      if (isReviewMode && reviewedProfilesInSession.includes(user.id)) {
+        console.log(`❌ Filtered out - already reviewed in this session: ${user.name}`);
+        return false;
+      }
+
+      // In normal mode, EXCLUDE passed users
+      if (!isReviewMode && passedUsers.includes(user.id)) {
+        console.log(`❌ Filtered out - already passed: ${user.name}`);
         return false;
       }
       
@@ -524,9 +739,38 @@ export default function HomeScreen() {
       return true;
     });
     
-    console.log(`🔍 Filtered users result: ${filtered.length} profiles`);
-    return filtered;
-  }, [allProfiles, filters, likedUsers, passedUsers]);
+    const shuffledFiltered = shuffleArray(filtered);
+
+    console.log(`🔍 Filtered users result: ${shuffledFiltered.length} profiles (randomized order)`);
+
+    // Do not show the prompt immediately here; we'll trigger it
+    // via a delayed effect so the user can see the last swipe finish.
+
+    // Reset promptShownOnce when we have profiles again
+    if (shuffledFiltered.length > 0 && promptShownOnce) {
+      setPromptShownOnce(false);
+    }
+
+    return shuffledFiltered;
+  }, [allProfiles, filters, likedUsers, passedUsers, isReviewMode, reviewedProfilesInSession, showReviewPrompt, promptShownOnce]);
+
+  // Delay the empty-state review prompt by 1 second after the stack becomes empty
+  useEffect(() => {
+    // Only schedule when truly empty and we haven't shown it for this empty state
+    if (filteredUsers.length === 0 && !showReviewPrompt && !promptShownOnce && passedUsers.length > 0) {
+      const timeout = setTimeout(() => {
+        // Re-check conditions at timeout to avoid stale triggers
+        if (filteredUsers.length === 0 && !showReviewPrompt && !promptShownOnce && passedUsers.length > 0) {
+          console.log('⏱️ Delayed: showing review prompt after last swipe');
+          setShowReviewPrompt(true);
+          setPromptShownOnce(true);
+          animateReviewPromptIn();
+        }
+      }, 1000);
+
+      return () => clearTimeout(timeout);
+    }
+  }, [filteredUsers.length, showReviewPrompt, promptShownOnce, passedUsers.length]);
   
   // Log filtering results for debugging
   useEffect(() => {
@@ -558,146 +802,140 @@ export default function HomeScreen() {
     setCurrentUserIndex(0);
   }, [filters.selectedGenders, filters.selectedSchools, filters.selectedCounties, filters.selectedLookingFor, filters.minCommonInterests, filters.selectedDatingIntentions, filters.selectedRelationshipStatuses]);
   
-  // Reset current user index when filtered users change (e.g., after swiping)
+  // Update display buffer when filteredUsers changes (but only when no pending swipes)
+  useEffect(() => {
+    if (pendingSwipes.current.size === 0) {
+      // No animations in progress, update display buffer immediately
+      setDisplayProfiles(filteredUsers);
+    }
+    // If there are pending swipes, the display buffer will update after animation completes
+  }, [filteredUsers]);
+
+  // Reset current user index when display profiles change
   useEffect(() => {
     // If current index is out of bounds, reset to 0
-    if (currentUserIndex >= filteredUsers.length && filteredUsers.length > 0) {
+    if (currentUserIndex >= displayProfiles.length && displayProfiles.length > 0) {
       console.log('🔄 Resetting currentUserIndex from', currentUserIndex, 'to 0 because it was out of bounds');
       setCurrentUserIndex(0);
     }
-  }, [filteredUsers.length, currentUserIndex]);
+  }, [displayProfiles.length, currentUserIndex]);
+
+  const currentUser = displayProfiles[currentUserIndex];
   
-  const currentUser = filteredUsers[currentUserIndex];
-  
-  console.log('🔍 Current user debug:', {
+  console.log('🔍 Current state:', {
     currentUserIndex,
     filteredUsersLength: filteredUsers.length,
+    displayProfilesLength: displayProfiles.length,
     currentUser: currentUser ? currentUser.name : 'No user',
-    hasCurrentUser: !!currentUser
+    hasCurrentUser: !!currentUser,
+    pendingSwipesCount: pendingSwipes.current.size
   });
 
-  // Show loading state while fetching profiles
-  if (isLoading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading profiles...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  // Remove loading state for seamless card experience
+  // Profiles will load in background while showing interface
 
-  // Show message if no profiles available
-  if (filteredUsers.length === 0) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.noProfilesContainer}>
-          <Text style={styles.noProfilesTitle}>No profiles available</Text>
-          <Text style={styles.noProfilesText}>
-            {allProfiles.length === 0 
-              ? 'No profiles have been created yet. Complete onboarding to see profiles!' 
-              : 'No profiles match your current filters. Try adjusting your preferences.'
+  // Show the interface even when no profiles are available
+  // This prevents the loading flash and maintains smooth UX
+
+  const handleSwipe = async (direction: 'left' | 'right', profile: ProfileData) => {
+    if (!userProfile) return;
+
+    console.log(`🎯 handleSwipe: ${direction} on profile ${profile.name} (${profile.id})`);
+
+    // PHASE 1: Add to pending swipes (prevents display buffer from updating)
+    pendingSwipes.current.set(profile.id, direction);
+
+    // Play haptic feedback immediately
+    if (direction === 'right') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } else {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    }
+
+    // Start database operations asynchronously (don't block)
+    if (direction === 'right') {
+      // Record the swipe and create like in database
+      MatchingService.recordSwipe(userProfile.id, profile.id, 'right');
+
+      LikesService.createLike(userProfile.id, profile.id).then(likeResult => {
+        if (likeResult) {
+          // Check if this creates a match
+          checkAndCreateMatch(profile.id).then(matchResult => {
+            if (matchResult.isMatch) {
+              setMatchedUser(profile);
+              setMatchId(matchResult.matchId || null);
+              setShowMatchNotification(true);
+              animateMatchNotificationIn();
             }
-          </Text>
-          <Button 
-            onPress={resetFilters}
-            style={styles.resetFiltersButton}
-          >
-            Reset Filters
-          </Button>
-        </View>
-      </SafeAreaView>
-    );
-  }
+          }).catch(error => {
+            console.error('❌ Error in match creation:', error);
+          });
+        } else {
+          console.error('Failed to save like to database');
+        }
+      });
+    } else {
+      // Record the pass in database
+      MatchingService.recordSwipe(userProfile.id, profile.id, 'left');
+    }
+
+    // PHASE 2: After animation completes, update permanent state AND display buffer
+    setTimeout(() => {
+      console.log(`✅ Animation complete for ${profile.name}, updating permanent state`);
+
+      if (direction === 'right') {
+        // Add to permanent liked users
+        setLikedUsers(prev => [...prev, profile.id]);
+
+        // If in review mode and user likes someone they previously passed, remove from passed list
+        if (isReviewMode && passedUsers.includes(profile.id)) {
+          setPassedUsers(prev => prev.filter(id => id !== profile.id));
+        }
+      } else {
+        // Add to permanent passed users
+        setPassedUsers(prev => {
+          if (!prev.includes(profile.id)) {
+            return [...prev, profile.id];
+          }
+          return prev;
+        });
+      }
+
+      // If in review mode, track that we've reviewed this profile in this session
+      if (isReviewMode) {
+        setReviewedProfilesInSession(prev => {
+          if (!prev.includes(profile.id)) {
+            return [...prev, profile.id];
+          }
+          return prev;
+        });
+      }
+
+      // Update display buffer first - remove the swiped card
+      setDisplayProfiles(prev => prev.filter(p => p.id !== profile.id));
+
+      // Remove from pending swipes queue
+      pendingSwipes.current.delete(profile.id);
+
+      // No need to increment currentUserIndex since we're removing from the array
+      // The next card will automatically be at index 0
+
+      console.log(`🗑️ Removed ${profile.name} from display buffer and pending swipes`);
+    }, 320); // Wait for card exit animation (300ms) + small buffer for cleanup
+  };
 
   const handleLike = async () => {
-    if (currentUser && userProfile) {
-      // Haptic feedback for like
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-      
-      // Record the swipe in the swipes table
-      await MatchingService.recordSwipe(userProfile.id, currentUser.id, 'right');
-      
-      // Save like to database
-      const likeResult = await LikesService.createLike(userProfile.id, currentUser.id);
-      
-      if (likeResult) {
-        setLikedUsers([...likedUsers, currentUser.id]);
-        
-        // Check if this creates a match BEFORE moving to next user
-        console.log('🔄 Checking for match after like...');
-        console.log('🔍 checkAndCreateMatch function:', typeof checkAndCreateMatch);
-        console.log('🔍 currentUser.id:', currentUser.id);
-        try {
-          const matchResult = await checkAndCreateMatch(currentUser.id);
-          console.log('🎯 Match result from main page:', matchResult);
-          
-          if (matchResult.isMatch) {
-            console.log('🎉 Match created! Showing notification...');
-            setMatchedUser(currentUser);
-            setMatchId(matchResult.matchId || null);
-            setShowMatchNotification(true);
-          } else {
-            console.log('❌ No match created from main page');
-          }
-        } catch (error) {
-          console.error('❌ Error in match creation:', error);
-        }
-        
-        // Move to next user after match check
-        nextUser();
-        
-        // Animate card off screen to the right (faster animation)
-        Animated.timing(translateX, {
-          toValue: width * 1.5,
-          duration: 150,
-          useNativeDriver: false,
-        }).start();
-      } else {
-        console.error('Failed to save like to database');
-        // Move to next user immediately even if database save failed
-        nextUser();
-        
-        // Still animate the card off screen even if database save failed
-        Animated.timing(translateX, {
-          toValue: width * 1.5,
-          duration: 150,
-          useNativeDriver: false,
-        }).start();
-      }
+    if (currentUser) {
+      await handleSwipe('right', currentUser);
     }
   };
 
   const handlePass = async () => {
-    if (currentUser && userProfile) {
-      // Haptic feedback for pass
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-      
-      // Record the swipe in the database
-      await MatchingService.recordSwipe(userProfile.id, currentUser.id, 'left');
-      
-      setPassedUsers([...passedUsers, currentUser.id]);
-      
-      // Move to next user immediately for instant profile switching
-      nextUser();
-      
-      // Animate card off screen to the left (faster animation)
-      Animated.timing(translateX, {
-        toValue: -width * 1.5,
-        duration: 150,
-        useNativeDriver: false,
-      }).start();
+    if (currentUser) {
+      await handleSwipe('left', currentUser);
     }
   };
 
-  const handleUndo = () => {
-    if (likedUsers.length > 0) {
-      const newLikedUsers = [...likedUsers];
-      newLikedUsers.pop();
-      setLikedUsers(newLikedUsers);
-      setCurrentUserIndex(Math.max(0, currentUserIndex - 1));
-    }
-  };
 
   const handleReport = () => {
     if (currentUser) {
@@ -791,26 +1029,203 @@ export default function HomeScreen() {
   };
 
   const handleFilter = () => {
-    // Trigger immediate preload when opening filters
-    if (userProfile?.id) {
-      console.log('🔄 Filter button pressed - triggering immediate preload');
-      profilePreloader.preloadFirstProfile(userProfile.id);
-    }
-    router.push('/filter');
+    // Play joyful haptics and animate button
+    playJoyfulButtonPressHaptic();
+    animateJoyfulFilterButton(() => {
+      router.push('/filter');
+    });
   };
 
-  // Update looking for preference in database
+  // Sidebar animation functions
+  const openSidebar = () => {
+    // Haptic feedback when opening
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+
+    // Reset button & back-button animation values when opening sidebar
+    buttonAnimValue.setValue(0);
+    buttonScaleValue.setValue(1);
+    setAnimatingButton(null);
+    backButtonOpacity.setValue(1);
+    backButtonScale.setValue(1);
+
+    setShowSidebar(true);
+    Animated.parallel([
+      Animated.timing(sidebarTranslateX, {
+        toValue: 0,
+        duration: 300,
+        useNativeDriver: false,
+      }),
+      Animated.timing(sidebarOpacity, {
+        toValue: 1,
+        duration: 250,
+        useNativeDriver: false,
+      }),
+    ]).start();
+  };
+
+  const closeSidebar = () => {
+    // Haptic feedback when closing
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    Animated.parallel([
+      Animated.timing(sidebarTranslateX, {
+        toValue: -width * 0.8,
+        duration: 250,
+        useNativeDriver: false,
+      }),
+      Animated.timing(sidebarOpacity, {
+        toValue: 0,
+        duration: 200,
+        useNativeDriver: false,
+      }),
+    ]).start(() => {
+      setShowSidebar(false);
+      // Reset button animation values when closing sidebar
+      buttonAnimValue.setValue(0);
+      buttonScaleValue.setValue(1);
+      setAnimatingButton(null);
+      // Also reset back button visuals so it isn't stuck small
+      backButtonOpacity.setValue(1);
+      backButtonScale.setValue(1);
+    });
+  };
+
+  // Back button animation with haptics (matching onboarding pattern)
+  const animateBackButton = (callback?: () => void) => {
+    // Haptic feedback
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    // Animate back with fade + scale combo like onboarding
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      if (callback) callback();
+    });
+  };
+
+  // Joyful filter button animation
+  const animateJoyfulFilterButton = (callback?: () => void) => {
+    Animated.sequence([
+      // Initial press down - quick and satisfying
+      Animated.timing(filterButtonScale, {
+        toValue: 0.92,
+        duration: 80,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      // Jump with joy - overshoot for bounce effect
+      Animated.timing(filterButtonScale, {
+        toValue: 1.08,
+        duration: 120,
+        easing: Easing.out(Easing.back(1.2)),
+        useNativeDriver: true,
+      }),
+      // Small secondary bounce
+      Animated.timing(filterButtonScale, {
+        toValue: 0.98,
+        duration: 100,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      }),
+      // Final settle with slight overshoot
+      Animated.timing(filterButtonScale, {
+        toValue: 1.02,
+        duration: 80,
+        easing: Easing.out(Easing.quad),
+        useNativeDriver: true,
+      }),
+      // Return to normal
+      Animated.timing(filterButtonScale, {
+        toValue: 1,
+        duration: 120,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      if (callback) callback();
+    });
+  };
+
+  // Button selection animation (matching onboarding looking-for page)
+  const animateButtonSelection = (optionId: string) => {
+    playLightHaptic(); // Initial tap haptic
+    setAnimatingButton(optionId);
+
+    // Ensure clean reset of animations (critical for modal consistency)
+    buttonAnimValue.setValue(0);
+    buttonScaleValue.setValue(1);
+
+    // Attach continuous haptics to the fill animation
+    const detachFillHaptics = attachProgressHaptics(buttonAnimValue, {
+      thresholds: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    });
+
+    // Weight-push effect
+    Animated.parallel([
+      // Fill animation with continuous haptic feedback
+      Animated.timing(buttonAnimValue, {
+        toValue: 1,
+        duration: 600,
+        useNativeDriver: false,
+      }),
+      // Button scale + push out effect
+      Animated.sequence([
+        Animated.delay(400), // Wait for fill to reach edges
+        Animated.parallel([
+          // Button push out
+          Animated.timing(buttonScaleValue, {
+            toValue: 1.04,
+            duration: 100,
+            useNativeDriver: true,
+          }),
+        ]),
+        // Return to normal size
+        Animated.timing(buttonScaleValue, {
+          toValue: 1,
+          duration: 150,
+          useNativeDriver: true,
+        }),
+      ])
+    ]).start(() => {
+      // Clean up haptics when animation completes
+      detachFillHaptics();
+      setAnimatingButton(null);
+    });
+
+    // Strong haptic feedback when button gets pushed out
+    setTimeout(() => {
+      try {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+      } catch (error) {
+        console.warn('Strong haptic failed:', error);
+      }
+    }, 500); // Timed with the button push-out effect
+  };
+
+  // Update looking for preference in database with animation
   const updateLookingForPreference = async (preference: 'dates' | 'friends' | 'both') => {
-    if (!userProfile) return;
-    
+    if (!userProfile || animatingButton) return; // Prevent multiple animations
+
+    // Start the button animation first
+    animateButtonSelection(preference);
+
     try {
       const { supabase } = await import('../../lib/supabase');
-      
+
       const { error } = await supabase
         .from('profiles')
         .update({ looking_for_friends_or_dates: preference })
         .eq('id', userProfile.id);
-      
+
       if (error) {
         console.error('Error updating looking for preference:', error);
         Alert.alert('Error', 'Failed to update preference. Please try again.');
@@ -831,385 +1246,353 @@ export default function HomeScreen() {
       filteredUsersLength: filteredUsers.length,
       canMoveNext: currentUserIndex < filteredUsers.length - 1
     });
-    
+
     setCurrentUserIndex(prevIndex => {
       console.log('🔄 nextUser state update:', {
         prevIndex,
         filteredUsersLength: filteredUsers.length,
         willMoveNext: prevIndex < filteredUsers.length - 1
       });
-      
+
       // Only move to next user if there are more users available
       if (prevIndex < filteredUsers.length - 1) {
-        // Reset animation values
-        translateX.setValue(0);
-        translateY.setValue(0);
-        rotate.setValue(0);
         return prevIndex + 1;
       }
-      
+
       // If we're at the end, stay at the current index
       console.log('⚠️ Already at the last user, staying at index:', prevIndex);
       return prevIndex;
     });
   };
 
-  const onGestureEvent = Animated.event(
-    [{ nativeEvent: { translationX: translateX, translationY: translateY } }],
-    { 
-      useNativeDriver: false,
-      listener: (event: any) => {
-        const { translationX } = event.nativeEvent;
-        const absX = Math.abs(translationX);
-        
-        // Determine direction and get haptic intensity
-        if (translationX > 0) {
-          // Swiping right (like)
-          const hapticInfo = getHapticIntensity(translationX, 'right');
-          if (hapticInfo && lastHapticLevel.current !== hapticInfo.level) {
-            Haptics.impactAsync(hapticInfo.style);
-            lastHapticLevel.current = hapticInfo.level;
-          }
-        } else if (translationX < 0) {
-          // Swiping left (pass)
-          const hapticInfo = getHapticIntensity(translationX, 'left');
-          if (hapticInfo && lastHapticLevel.current !== hapticInfo.level) {
-            Haptics.impactAsync(hapticInfo.style);
-            lastHapticLevel.current = hapticInfo.level;
-          }
-        } else if (absX < HAPTIC_THRESHOLDS.VERY_LIGHT) {
-          // Reset when returning to center
-          lastHapticLevel.current = null;
-        }
-      }
-    }
-  );
-
-  const onHandlerStateChange = (event: any) => {
-    if (event.nativeEvent.state === State.BEGAN) {
-      // Reset haptic level when gesture starts
-      lastHapticLevel.current = null;
-    } else if (event.nativeEvent.state === State.END) {
-      const { translationX } = event.nativeEvent;
-
-      if (translationX > SWIPE_THRESHOLD) {
-        // Swipe right - Like
-        handleLike();
-      } else if (translationX < -SWIPE_THRESHOLD) {
-        // Swipe left - Pass
-        handlePass();
-      } else {
-        // Return to center with spring animation
-        Animated.parallel([
-          Animated.spring(translateX, {
-            toValue: 0,
-            useNativeDriver: false,
-            tension: 100,
-            friction: 8,
-          }),
-          Animated.spring(translateY, {
-            toValue: 0,
-            useNativeDriver: false,
-            tension: 100,
-            friction: 8,
-          }),
-        ]).start();
-      }
-    }
-  };
-
-  // Calculate rotation based on horizontal movement
-  const cardRotation = translateX.interpolate({
-    inputRange: [-width / 2, 0, width / 2],
-    outputRange: ['-10deg', '0deg', '10deg'],
-    extrapolate: 'clamp',
-  });
-
-  // Calculate scale based on movement (subtle zoom effect)
-  const cardScale = translateX.interpolate({
-    inputRange: [-width / 2, 0, width / 2],
-    outputRange: [0.92, 1, 0.92],
-    extrapolate: 'clamp',
-  });
-
-  // Add subtle vertical movement for more natural feel
-  const cardTranslateY = translateX.interpolate({
-    inputRange: [-width / 2, 0, width / 2],
-    outputRange: [20, 0, -20],
-    extrapolate: 'clamp',
-  });
-
-  // Like overlay opacity (pink) - shows when swiping right
-  const likeOverlayOpacity = translateX.interpolate({
-    inputRange: [0, SWIPE_THRESHOLD],
-    outputRange: [0, 1],
-    extrapolate: 'clamp',
-  });
-
-  // Dislike overlay opacity (purple) - shows when swiping left
-  const dislikeOverlayOpacity = translateX.interpolate({
-    inputRange: [-SWIPE_THRESHOLD, 0],
-    outputRange: [1, 0],
-    extrapolate: 'clamp',
-  });
-
-  if (!currentUser) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.noMoreUsers}>
-          <Text style={styles.noMoreUsersText}>
-            {filteredUsers.length === 0 ? 'No profiles match your filters' : 'No more profiles to show'}
-          </Text>
-          <Text style={styles.noMoreUsersSubtext}>
-            {filteredUsers.length === 0 
-              ? 'Try adjusting your filters to see more profiles' 
-              : 'Check back later for new matches!'
-            }
-          </Text>
-          {filteredUsers.length === 0 && (
-            <TouchableOpacity 
-              style={styles.adjustFiltersButton}
-              onPress={() => router.push('/filter')}
-            >
-              <Text style={styles.adjustFiltersButtonText}>Adjust Filters</Text>
-            </TouchableOpacity>
-          )}
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
+    <>
     <SafeAreaView style={styles.container}>
       {/* Header integrated into main container */}
       <View style={styles.header}>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.menuButton}
-          onPress={() => setShowSidebar(true)}
+          onPress={openSidebar}
         >
-          <FontAwesome5 
-            name="bars" 
-            size={20} 
-            color="#FF4F81" 
+          <FontAwesome5
+            name="bars"
+            size={20}
+            color="#FF4F81"
           />
         </TouchableOpacity>
-        
+
         <View style={styles.headerTitleContainer}>
           <Text style={styles.headerTitle}>
             <Text style={styles.debsText}>Debs</Text>
             <Text style={styles.matchText}>Match</Text>
           </Text>
         </View>
-        
-        <TouchableOpacity 
-          style={styles.filterButton}
-          onPress={handleFilter}
-        >
-          <FontAwesome5 
-            name="filter" 
-            size={20} 
-            color="#c3b1e1" 
-          />
-        </TouchableOpacity>
+
+        <Animated.View style={{ transform: [{ scale: filterButtonScale }] }}>
+          <TouchableOpacity
+            style={styles.filterButton}
+            onPress={handleFilter}
+          >
+            <FontAwesome5
+              name="filter"
+              size={20}
+              color="#c3b1e1"
+            />
+          </TouchableOpacity>
+        </Animated.View>
+
+
+        {/* Header Overlay for Match Notification */}
+        {showMatchNotification && (
+          <Animated.View style={[
+            styles.headerOverlay,
+            { opacity: matchOverlayOpacity }
+          ]} />
+        )}
       </View>
 
-
-
-      {/* Main content area - New Scrollable Profile Card with Swipe Gestures */}
+      {/* Main content area - idle image behind card stack for peek effect */}
       <View style={styles.mainContent}>
-          <PanGestureHandler
-            onGestureEvent={onGestureEvent}
-            onHandlerStateChange={onHandlerStateChange}
-          >
-            <Animated.View
-              style={[
-              styles.cardContainer,
-                {
-                  transform: [
-                    { translateX },
-                    { translateY: cardTranslateY },
-                    { rotate: cardRotation },
-                    { scale: cardScale },
-                  ],
-                },
-              ]}
-            >
-            <ScrollableProfileCard
-              ref={profileCardRef}
-              profile={currentUser}
-              onUndo={handleUndo}
-              canUndo={likedUsers.length > 0}
-              onLike={handleLike}
-              onDislike={handlePass}
-              onReport={handleReport}
-            />
-            
-            {/* Like Overlay - Pink */}
-                <Animated.View
-                  style={[
-                styles.swipeOverlay,
-                styles.likeOverlay,
-                { opacity: likeOverlayOpacity }
-              ]}
-            >
-              <FontAwesome5 name="heart" size={60} color="#FFFFFF" />
-              <Text style={styles.swipeOverlayText}>LIKE</Text>
-                </Animated.View>
+        {/* Always render idle image (preloaded) - animated fade-in when no cards available */}
+        <Animated.View style={[
+          styles.idleImageWrapper,
+          { opacity: idleImageOpacity }
+        ]} pointerEvents="none">
+          <Image
+            source={require('../../Images/swiping idle state.png')}
+            style={styles.idleImage}
+            contentFit="cover"
+            priority="high"
+          />
+        </Animated.View>
 
-            {/* Dislike Overlay - Purple */}
-                <Animated.View
-                  style={[
-                styles.swipeOverlay,
-                styles.dislikeOverlay,
-                { opacity: dislikeOverlayOpacity }
-              ]}
-            >
-              <FontAwesome5 name="times" size={60} color="#FFFFFF" />
-              <Text style={styles.swipeOverlayText}>NOPE</Text>
-                </Animated.View>
-            </Animated.View>
-          </PanGestureHandler>
+        {displayProfiles.length > 0 && (
+          <TinderCardStack
+            profiles={displayProfiles}
+            currentIndex={currentUserIndex}
+            onSwipe={handleSwipe}
+            onReport={handleReport}
+            onRefresh={handlePullToRefresh}
+            isRefreshing={isRefreshing}
+          />
+        )}
       </View>
 
       {/* Sidebar Menu */}
       {showSidebar && (
         <View style={styles.sidebarOverlay}>
-          <TouchableOpacity 
-            style={styles.sidebarBackdrop}
-            onPress={() => setShowSidebar(false)}
-            activeOpacity={1}
-          />
-          <View style={styles.sidebar}>
+          <Animated.View
+            style={[
+              styles.sidebarBackdrop,
+              { opacity: sidebarOpacity }
+            ]}
+          >
+            <TouchableOpacity
+              style={{ flex: 1 }}
+              onPress={closeSidebar}
+              activeOpacity={1}
+            />
+          </Animated.View>
+          <Animated.View style={[
+            styles.sidebar,
+            { transform: [{ translateX: sidebarTranslateX }] }
+          ]}>
             <View style={styles.sidebarHeader}>
               <Text style={styles.sidebarTitle}>Looking For</Text>
-              <TouchableOpacity 
-                style={styles.sidebarCloseButton}
-                onPress={() => setShowSidebar(false)}
-              >
-                <FontAwesome5 name="times" size={20} color="#6B7280" />
-              </TouchableOpacity>
+              <View style={styles.sidebarCloseButton}>
+                <Animated.View style={{
+                  opacity: backButtonOpacity,
+                  transform: [{ scale: backButtonScale }],
+                }}>
+                  <BackButton
+                    onPress={() => animateBackButton(closeSidebar)}
+                    color="#c3b1e1"
+                    size={56}
+                    iconSize={24}
+                    direction="right"
+                  />
+                </Animated.View>
+              </View>
             </View>
             
             <View style={styles.sidebarContent}>
-              <TouchableOpacity 
-                style={styles.sidebarOptionButton}
-                onPress={() => updateLookingForPreference('dates')}
-                activeOpacity={0.7}
+              <Animated.View
+                style={{
+                  transform: [{
+                    scale: (animatingButton === 'dates') ? buttonScaleValue : 1
+                  }]
+                }}
               >
-                <LinearGradient
-                  colors={
-                    lookingForPreference === 'dates' 
-                      ? ['#FF4F81', '#FF4F81'] // Solid pink for active
-                      : ['#FFFFFF', '#FFF0F5'] // White to light pink gradient for inactive
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.sidebarOptionGradient}
+                <TouchableOpacity
+                  style={styles.sidebarOptionButton}
+                  onPress={() => updateLookingForPreference('dates')}
+                  activeOpacity={0.7}
                 >
-                  <Ionicons 
-                    name="heart" 
-                    size={24} 
-                    color={lookingForPreference === 'dates' ? '#FFFFFF' : '#c3b1e1'} 
-                    style={styles.sidebarOptionIcon}
+                  {/* Background gradient base */}
+                  <LinearGradient
+                    colors={
+                      (lookingForPreference === 'dates' && animatingButton !== 'dates')
+                        ? ['#FF4F81', '#FF4F81'] // Solid pink when active and not animating
+                        : ['#FFFFFF', '#FFF0F5'] // Keep inactive during animation to show center fill
+                    }
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.sidebarOptionBackground}
                   />
-                  <Text style={[
-                    styles.sidebarOptionLabel,
-                    lookingForPreference === 'dates' && styles.sidebarOptionLabelActive
-                  ]}>
-                    Dates
-                  </Text>
-                </LinearGradient>
-              </TouchableOpacity>
+
+                  {/* Animated center-out fill background (above gradient, below content) */}
+                  {animatingButton === 'dates' && (
+                    <Animated.View
+                      style={[
+                        styles.centerFillBackground,
+                        {
+                          transform: [{
+                            scaleX: buttonAnimValue.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [0, 1],
+                            }),
+                          }],
+                        },
+                      ]}
+                    />
+                  )}
+
+                  {/* Content */}
+                  <View style={styles.sidebarOptionContent}>
+                    <Ionicons
+                      name="heart"
+                      size={24}
+                      color={
+                        (lookingForPreference === 'dates' || animatingButton === 'dates')
+                          ? '#FFFFFF'
+                          : '#c3b1e1'
+                      }
+                      style={styles.sidebarOptionIcon}
+                    />
+                    <Text style={[
+                      styles.sidebarOptionLabel,
+                      (lookingForPreference === 'dates' || animatingButton === 'dates') && styles.sidebarOptionLabelActive
+                    ]}>
+                      Dates
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              </Animated.View>
               
-              <TouchableOpacity 
-                style={styles.sidebarOptionButton}
-                onPress={() => updateLookingForPreference('friends')}
-                activeOpacity={0.7}
+              <Animated.View
+                style={{
+                  transform: [{
+                    scale: (animatingButton === 'friends') ? buttonScaleValue : 1
+                  }]
+                }}
               >
-                <LinearGradient
-                  colors={
-                    lookingForPreference === 'friends' 
-                      ? ['#FF4F81', '#FF4F81'] // Solid pink for active
-                      : ['#FFFFFF', '#FFF0F5'] // White to light pink gradient for inactive
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.sidebarOptionGradient}
+                <TouchableOpacity
+                  style={styles.sidebarOptionButton}
+                  onPress={() => updateLookingForPreference('friends')}
+                  activeOpacity={0.7}
                 >
-                  <Ionicons 
-                    name="people" 
-                    size={24} 
-                    color={lookingForPreference === 'friends' ? '#FFFFFF' : '#c3b1e1'} 
-                    style={styles.sidebarOptionIcon}
+                  {/* Background gradient base */}
+                  <LinearGradient
+                    colors={
+                      (lookingForPreference === 'friends' && animatingButton !== 'friends')
+                        ? ['#FF4F81', '#FF4F81'] // Solid pink when active and not animating
+                        : ['#FFFFFF', '#FFF0F5'] // Keep inactive during animation to show center fill
+                    }
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.sidebarOptionBackground}
                   />
-                  <Text style={[
-                    styles.sidebarOptionLabel,
-                    lookingForPreference === 'friends' && styles.sidebarOptionLabelActive
-                  ]}>
-                    Friends
-                  </Text>
-                </LinearGradient>
-              </TouchableOpacity>
+
+                  {/* Animated center-out fill background (above gradient, below content) */}
+                  {animatingButton === 'friends' && (
+                    <Animated.View
+                      style={[
+                        styles.centerFillBackground,
+                        {
+                          transform: [{
+                            scaleX: buttonAnimValue.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [0, 1],
+                            }),
+                          }],
+                        },
+                      ]}
+                    />
+                  )}
+
+                  {/* Content */}
+                  <View style={styles.sidebarOptionContent}>
+                    <Ionicons
+                      name="people"
+                      size={24}
+                      color={
+                        (lookingForPreference === 'friends' || animatingButton === 'friends')
+                          ? '#FFFFFF'
+                          : '#c3b1e1'
+                      }
+                      style={styles.sidebarOptionIcon}
+                    />
+                    <Text style={[
+                      styles.sidebarOptionLabel,
+                      (lookingForPreference === 'friends' || animatingButton === 'friends') && styles.sidebarOptionLabelActive
+                    ]}>
+                      Friends
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              </Animated.View>
               
-              <TouchableOpacity 
-                style={styles.sidebarOptionButton}
-                onPress={() => updateLookingForPreference('both')}
-                activeOpacity={0.7}
+              <Animated.View
+                style={{
+                  transform: [{
+                    scale: (animatingButton === 'both') ? buttonScaleValue : 1
+                  }]
+                }}
               >
-                <LinearGradient
-                  colors={
-                    lookingForPreference === 'both' 
-                      ? ['#FF4F81', '#FF4F81'] // Solid pink for active
-                      : ['#FFFFFF', '#FFF0F5'] // White to light pink gradient for inactive
-                  }
-                  start={{ x: 0, y: 0 }}
-                  end={{ x: 1, y: 1 }}
-                  style={styles.sidebarOptionGradient}
+                <TouchableOpacity
+                  style={styles.sidebarOptionButton}
+                  onPress={() => updateLookingForPreference('both')}
+                  activeOpacity={0.7}
                 >
-                  <Ionicons 
-                    name="happy" 
-                    size={24} 
-                    color={lookingForPreference === 'both' ? '#FFFFFF' : '#c3b1e1'} 
-                    style={styles.sidebarOptionIcon}
+                  {/* Background gradient base */}
+                  <LinearGradient
+                    colors={
+                      (lookingForPreference === 'both' && animatingButton !== 'both')
+                        ? ['#FF4F81', '#FF4F81'] // Solid pink when active and not animating
+                        : ['#FFFFFF', '#FFF0F5'] // Keep inactive during animation to show center fill
+                    }
+                    start={{ x: 0, y: 0 }}
+                    end={{ x: 1, y: 1 }}
+                    style={styles.sidebarOptionBackground}
                   />
-                  <Text style={[
-                    styles.sidebarOptionLabel,
-                    lookingForPreference === 'both' && styles.sidebarOptionLabelActive
-                  ]}>
-                    Both
-                  </Text>
-                </LinearGradient>
-              </TouchableOpacity>
+
+                  {/* Animated center-out fill background (above gradient, below content) */}
+                  {animatingButton === 'both' && (
+                    <Animated.View
+                      style={[
+                        styles.centerFillBackground,
+                        {
+                          transform: [{
+                            scaleX: buttonAnimValue.interpolate({
+                              inputRange: [0, 1],
+                              outputRange: [0, 1],
+                            }),
+                          }],
+                        },
+                      ]}
+                    />
+                  )}
+
+                  {/* Content */}
+                  <View style={styles.sidebarOptionContent}>
+                    <Ionicons
+                      name="happy"
+                      size={24}
+                      color={
+                        (lookingForPreference === 'both' || animatingButton === 'both')
+                          ? '#FFFFFF'
+                          : '#c3b1e1'
+                      }
+                      style={styles.sidebarOptionIcon}
+                    />
+                    <Text style={[
+                      styles.sidebarOptionLabel,
+                      (lookingForPreference === 'both' || animatingButton === 'both') && styles.sidebarOptionLabelActive
+                    ]}>
+                      Both
+                    </Text>
+                  </View>
+                </TouchableOpacity>
+              </Animated.View>
             </View>
-          </View>
+          </Animated.View>
         </View>
       )}
 
               {/* Match Notification - Premium Bumble style */}
         {showMatchNotification && matchedUser && (
-          <Animated.View style={styles.matchNotification}>
-            <View style={styles.matchNotificationContent}>
-              {/* Match Icon with Animation */}
-              <View style={styles.matchIconContainer}>
-                <View style={styles.matchIconInner}>
-                  <FontAwesome5 name="heart" size={45} color="#FF4F81" />
-                </View>
-                <View style={styles.matchIconGlow} />
-              </View>
-              
-              {/* Match Title with Sparkle */}
+          <Animated.View style={[
+            styles.matchNotification,
+            { opacity: matchOverlayOpacity }
+          ]}>
+            <Animated.View style={[
+              styles.matchNotificationContent,
+              { transform: [{ scale: matchScale }] }
+            ]}>
+              {/* Match Title */}
               <View style={styles.matchTitleContainer}>
-                <FontAwesome5 name="sparkles" size={20} color="#FFD700" style={styles.sparkleIcon} />
                 <Text style={styles.matchNotificationTitle}>It's a Match!</Text>
-                <FontAwesome5 name="sparkles" size={20} color="#FFD700" style={styles.sparkleIcon} />
               </View>
               
               {/* Match Description with Profile Pictures */}
               <View style={styles.matchProfilesContainer}>
-                <View style={styles.matchProfileContainer}>
+                <Animated.View style={[
+                  styles.matchProfileContainer,
+                  { transform: [{ scale: matchProfile1Scale }] }
+                ]}>
                   {userProfile?.photos && userProfile.photos.length > 0 ? (
-                    <Image 
-                      source={{ uri: userProfile.photos[0] }} 
+                    <Image
+                      source={{ uri: userProfile.photos[0] }}
                       style={styles.matchProfileImage}
                       contentFit="cover"
                     />
@@ -1219,16 +1602,22 @@ export default function HomeScreen() {
                     </View>
                   )}
                   <Text style={styles.matchProfileName}>{userProfile?.firstName}</Text>
-                </View>
-                
-                <View style={styles.matchHeartContainer}>
+                </Animated.View>
+
+                <Animated.View style={[
+                  styles.matchHeartContainer,
+                  { transform: [{ scale: matchGlowPulse }] }
+                ]}>
                   <FontAwesome5 name="heart" size={24} color="#FF4F81" />
-                </View>
-                
-                <View style={styles.matchProfileContainer}>
+                </Animated.View>
+
+                <Animated.View style={[
+                  styles.matchProfileContainer,
+                  { transform: [{ scale: matchProfile2Scale }] }
+                ]}>
                   {matchedUser.photos && matchedUser.photos.length > 0 ? (
-                    <Image 
-                      source={{ uri: matchedUser.photos[0] }} 
+                    <Image
+                      source={{ uri: matchedUser.photos[0] }}
                       style={styles.matchProfileImage}
                       contentFit="cover"
                     />
@@ -1238,7 +1627,7 @@ export default function HomeScreen() {
                     </View>
                   )}
                   <Text style={styles.matchProfileName}>{matchedUser.first_name}</Text>
-                </View>
+                </Animated.View>
               </View>
               
               <Text style={styles.matchNotificationText}>
@@ -1247,27 +1636,31 @@ export default function HomeScreen() {
               
               {/* Match Buttons */}
               <View style={styles.matchNotificationButtons}>
-                                  <TouchableOpacity 
-                    style={styles.matchChatButton}
-                    onPress={() => {
-                      setShowMatchNotification(false);
-                      // Navigate to chat using match ID
-                      if (matchId) {
-                        router.push(`/chat/${matchId}?name=${encodeURIComponent(matchedUser.name)}&userId=${matchedUser.id}`);
-                      }
-                    }}
-                  >
-                    <Text style={styles.matchChatButtonText}>Start Chat</Text>
-                  </TouchableOpacity>
-                  
-                  <TouchableOpacity 
-                    style={styles.matchKeepSwipingButton}
-                    onPress={() => setShowMatchNotification(false)}
-                  >
-                    <Text style={styles.matchKeepSwipingButtonText}>Keep Swiping</Text>
-                  </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.matchChatButton}
+                  onPress={() => {
+                    playJoyfulButtonPressHaptic();
+                    setShowMatchNotification(false);
+                    // Navigate to chat using match ID
+                    if (matchId) {
+                      router.push(`/chat/${matchId}?name=${encodeURIComponent(matchedUser.name)}&userId=${matchedUser.id}`);
+                    }
+                  }}
+                >
+                  <Text style={styles.matchChatButtonText}>Chat</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.matchKeepSwipingButton}
+                  onPress={() => {
+                    playLightHaptic();
+                    setShowMatchNotification(false);
+                  }}
+                >
+                  <Text style={styles.matchKeepSwipingButtonText} numberOfLines={1}>Ok</Text>
+                </TouchableOpacity>
               </View>
-            </View>
+            </Animated.View>
           </Animated.View>
         )}
 
@@ -1335,9 +1728,86 @@ export default function HomeScreen() {
           reportedUserName={currentUser?.name || ''}
         />
 
+        {/* Filters Applied Popup */}
+        <FiltersAppliedPopup
+          visible={showFiltersAppliedPopup}
+          onClose={() => setShowFiltersAppliedPopup(false)}
+          filterCount={getActiveFiltersCount()}
+        />
+
+        {/* Review Profiles Prompt Modal */}
+        <Modal
+          visible={showReviewPrompt}
+          transparent={true}
+          animationType="none"
+          onRequestClose={() => animateReviewPromptOut()}
+        >
+          <View style={styles.modalOverlay}>
+            <Animated.View
+              style={[
+                styles.reviewPromptModal,
+                {
+                  opacity: reviewPromptOpacity,
+                  transform: [{ scale: reviewPromptScale }],
+                }
+              ]}
+            >
+
+              {/* Title */}
+              <Text style={styles.reviewPromptTitle}>You've Seen Everyone!</Text>
+
+              {/* Message */}
+              <Text style={styles.reviewPromptMessage}>
+                You've swiped through all available profiles. Would you like to review profiles you previously passed on?
+              </Text>
+
+              {/* Info note */}
+              <View style={styles.reviewPromptInfoBox}>
+                <FontAwesome5 name="info-circle" size={14} color="#FF4F81" style={{ marginRight: 8 }} />
+                <Text style={styles.reviewPromptInfoText}>
+                  You won't see profiles you've already liked
+                </Text>
+              </View>
+
+              {/* Buttons */}
+              <View style={styles.reviewPromptButtons}>
+                <TouchableOpacity
+                  style={styles.reviewPromptDeclineButton}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    animateReviewPromptOut(() => {
+                      // User declined - exit review mode if in it
+                      setIsReviewMode(false);
+                      setReviewedProfilesInSession([]); // Reset reviewed profiles
+                    });
+                  }}
+                >
+                  <Text style={styles.reviewPromptDeclineText}>No</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.reviewPromptAcceptButton}
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    animateReviewPromptOut(() => {
+                      // User accepted - enter/stay in review mode and reset index
+                      setIsReviewMode(true);
+                      setReviewedProfilesInSession([]); // Reset reviewed profiles for new session
+                      setCurrentUserIndex(0);
+                    });
+                  }}
+                >
+                  <Text style={styles.reviewPromptAcceptText}>Yes</Text>
+                </TouchableOpacity>
+              </View>
+            </Animated.View>
+          </View>
+        </Modal>
+
       </SafeAreaView>
-    );
-  }
+    </>
+  );
+}
 
 const styles = StyleSheet.create({
   container: {
@@ -1353,6 +1823,16 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     minHeight: 60,
     zIndex: 1000,
+  },
+  headerOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    zIndex: 10,
+    pointerEvents: 'none',
   },
   menuButton: {
     minWidth: 40,
@@ -1412,11 +1892,26 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#E8D4FF',
   },
-      userPhoto: {
-      width: '100%',
-      height: height * 0.78,
-      resizeMode: 'cover',
-    },
+  userPhoto: {
+    width: '100%',
+    height: height * 0.78,
+    resizeMode: 'cover',
+  },
+  idleImage: {
+    width: '100%',
+    height: '100%',
+  },
+  idleImageWrapper: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    marginHorizontal: 8,  // Match card margins and underlay
+    marginBottom: 0,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
   userInfo: {
     padding: 20,
     backgroundColor: '#FAFAFA',
@@ -1535,25 +2030,28 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.9)',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
     justifyContent: 'center',
     alignItems: 'center',
     zIndex: 100,
+    backdropFilter: 'blur(20px)',
   },
   matchNotificationContent: {
     backgroundColor: '#FFFFFF',
     borderRadius: 30,
-    padding: 36,
+    padding: 32,
     alignItems: 'center',
-    width: width * 0.88,
-    shadowColor: '#000',
+    width: width * 0.78,
+    shadowColor: '#FF4F81',
     shadowOffset: {
       width: 0,
-      height: 15,
+      height: 20,
     },
-    shadowOpacity: 0.4,
-    shadowRadius: 25,
-    elevation: 15,
+    shadowOpacity: 0.5,
+    shadowRadius: 30,
+    elevation: 20,
+    borderWidth: 3,
+    borderColor: 'rgba(255, 79, 129, 0.2)',
   },
   matchIconContainer: {
     width: 100,
@@ -1586,8 +2084,7 @@ const styles = StyleSheet.create({
     height: 100,
     borderRadius: 50,
     backgroundColor: '#FF4F81',
-    opacity: 0.1,
-    transform: [{ scale: 1.2 }],
+    opacity: 0.25,
   },
   matchTitleContainer: {
     flexDirection: 'row',
@@ -2142,7 +2639,11 @@ const styles = StyleSheet.create({
       zIndex: 1000,
     },
     sidebarBackdrop: {
-      flex: 1,
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
       backgroundColor: 'rgba(0, 0, 0, 0.5)',
     },
     sidebar: {
@@ -2176,10 +2677,8 @@ const styles = StyleSheet.create({
       fontFamily: Fonts.bold,
     },
     sidebarCloseButton: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      backgroundColor: '#F3F4F6',
+      width: 56,
+      height: 56,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -2199,15 +2698,26 @@ const styles = StyleSheet.create({
       elevation: 2,
       overflow: 'hidden', // Ensure gradient doesn't overflow
     },
-    sidebarOptionGradient: {
+    // Absolute background gradient for the button container
+    sidebarOptionBackground: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      borderRadius: 14,
+    },
+    // Foreground content layer (icon + text)
+    sidebarOptionContent: {
       flex: 1,
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'flex-start', // Push content to the left
-      paddingVertical: 24, // Generous vertical padding
-      paddingHorizontal: SPACING.xl, // Same as continue button (32px)
-      borderRadius: 14, // Slightly smaller to account for border
-      minHeight: 76, // Ensure minimum height for content
+      justifyContent: 'flex-start',
+      paddingVertical: 24,
+      paddingHorizontal: SPACING.xl,
+      borderRadius: 14,
+      minHeight: 76,
+      zIndex: 2,
     },
     sidebarOptionIcon: {
       marginRight: SPACING.md, // Using design system token
@@ -2224,4 +2734,99 @@ const styles = StyleSheet.create({
       fontWeight: '600', // SemiBold weight for prominence
       fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
     },
+    centerFillBackground: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: '#FF4F81',
+      borderRadius: 14, // Slightly smaller than button border radius to account for border
+      zIndex: 1,
+    },
+  // Review Prompt Modal Styles
+  reviewPromptModal: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 24,
+    padding: 32,
+    width: width * 0.85,
+    maxWidth: 400,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.3,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  reviewPromptTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: '#1B1B3A',
+    textAlign: 'center',
+    marginBottom: 12,
+    fontFamily: Fonts.bold,
+  },
+  reviewPromptMessage: {
+    fontSize: 16,
+    color: '#c3b1e1',
+    textAlign: 'center',
+    lineHeight: 24,
+    marginBottom: 20,
+    fontFamily: Fonts.regular,
+  },
+  reviewPromptInfoBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FFE8F0',
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 12,
+    marginBottom: 24,
+    borderWidth: 1,
+    borderColor: '#FFC3D4',
+  },
+  reviewPromptInfoText: {
+    fontSize: 13,
+    color: '#FF4F81',
+    fontWeight: '600',
+    fontFamily: Fonts.semiBold,
+  },
+  reviewPromptButtons: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  reviewPromptDeclineButton: {
+    flex: 1,
+    backgroundColor: '#F5F5F5',
+    paddingVertical: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#E8E8E8',
+  },
+  reviewPromptDeclineText: {
+    color: '#666666',
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: Fonts.bold,
+  },
+  reviewPromptAcceptButton: {
+    flex: 1,
+    backgroundColor: '#FF4F81',
+    paddingVertical: 16,
+    borderRadius: 16,
+    alignItems: 'center',
+    shadowColor: '#FF4F81',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  reviewPromptAcceptText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+    fontFamily: Fonts.bold,
+  },
 });

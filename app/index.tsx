@@ -1,21 +1,61 @@
-import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, Animated, Platform, Dimensions } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, StyleSheet, SafeAreaView, Animated, Platform, Dimensions, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useCustomFonts, Fonts } from '../utils/fonts';
 import { AnimatedTextButton } from '../components/ui/AnimatedButton';
+import { useOnboarding, ONBOARDING_STEPS } from '../OnboardingContext';
+import { useAuth } from '../contexts/AuthContext';
+import { ResumeOnboardingModal } from '../components/ResumeOnboardingModal';
+import { ProgressiveOnboardingService } from '../services/progressiveOnboarding';
 
 const { width, height } = Dimensions.get('window');
 
 export default function LandingPage() {
   const fontsLoaded = useCustomFonts();
   const [showContent, setShowContent] = React.useState(false);
+  const [showResumeModal, setShowResumeModal] = useState(false);
+  const { data: onboardingData, isLoaded: onboardingLoaded, clearData } = useOnboarding();
+  const { user, loading: authLoading } = useAuth();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
   const scaleAnim = useRef(new Animated.Value(0.9)).current;
   const logoAnim = useRef(new Animated.Value(0)).current;
   const buttonsSlideUp = useRef(new Animated.Value(50)).current;
+
+  // Check for incomplete onboarding and resume
+  useEffect(() => {
+    const checkOnboardingStatus = async () => {
+      if (!onboardingLoaded || authLoading || !fontsLoaded) {
+        return; // Wait for everything to load
+      }
+
+      console.log('🔍 Checking for incomplete onboarding...', {
+        hasCurrentStep: !!onboardingData.currentStep,
+        currentStep: onboardingData.currentStep,
+        onboardingCompleted: onboardingData.onboardingCompleted,
+        hasUser: !!user,
+        userOnboardingCompleted: user?.profile?.onboardingCompleted,
+      });
+
+      // Note: Root layout will handle redirecting authenticated users to tabs
+      // We just need to check for incomplete onboarding on this page
+
+      // If there's incomplete onboarding data, show resume modal on this page
+      if (onboardingData.currentStep && !onboardingData.onboardingCompleted && !user) {
+        console.log('🔄 Found incomplete onboarding, showing resume modal');
+        setShowContent(true);
+        setShowResumeModal(true);
+        return;
+      }
+
+      // Otherwise, show the landing page
+      setShowContent(true);
+    };
+
+    checkOnboardingStatus();
+  }, [onboardingLoaded, authLoading, fontsLoaded, onboardingData.currentStep, onboardingData.onboardingCompleted, user]);
 
   // Fallback timeout in case fonts don't load
   React.useEffect(() => {
@@ -25,6 +65,39 @@ export default function LandingPage() {
 
     return () => clearTimeout(timer);
   }, []);
+
+  const handleResumeContinue = () => {
+    console.log('➡️ Continuing from:', onboardingData.currentStep);
+    setShowResumeModal(false);
+    // Navigate to the saved step
+    if (onboardingData.currentStep) {
+      router.push(onboardingData.currentStep as any);
+    }
+  };
+
+  const handleStartOver = async () => {
+    console.log('🔄 Starting over, clearing onboarding data');
+    setShowResumeModal(false);
+
+    // Clear local onboarding data from AsyncStorage
+    await clearData();
+
+    // If user is authenticated, also delete from database
+    if (user) {
+      console.log('🗑️ User is authenticated, deleting profile from database');
+      const result = await ProgressiveOnboardingService.resetOnboarding();
+
+      if (result.success) {
+        console.log('✅ Successfully reset onboarding in database');
+      } else {
+        console.error('❌ Failed to reset onboarding:', result.error);
+      }
+    } else {
+      console.log('ℹ️ User not authenticated, only cleared local data');
+    }
+
+    // Stay on landing page - user can now choose Create Account or Sign In
+  };
 
   useEffect(() => {
     if (fontsLoaded) {
@@ -65,12 +138,14 @@ export default function LandingPage() {
     }
   }, [fontsLoaded]);
 
-  if (!fontsLoaded && !showContent) {
+  // Show loading while checking for resume state
+  if (!fontsLoaded || !onboardingLoaded || authLoading || !showContent) {
     return (
       <View style={styles.container}>
         <SafeAreaView style={styles.safeArea}>
           <View style={styles.loadingContainer}>
-            <Text style={styles.loadingText}>Loading fonts...</Text>
+            <ActivityIndicator size="large" color="#FF4F81" />
+            <Text style={styles.loadingText}>Loading...</Text>
           </View>
         </SafeAreaView>
       </View>
@@ -79,6 +154,13 @@ export default function LandingPage() {
 
   return (
     <View style={styles.container}>
+      {/* Resume Onboarding Modal */}
+      <ResumeOnboardingModal
+        visible={showResumeModal}
+        onContinue={handleResumeContinue}
+        onStartOver={handleStartOver}
+      />
+
       <SafeAreaView style={styles.safeArea}>
         {/* App Title */}
         <Animated.View 
@@ -112,15 +194,16 @@ export default function LandingPage() {
                 { translateY: logoAnim.interpolate({
                   inputRange: [0, 1],
                   outputRange: [20, 0]
-                })}
+                })},
+                { translateY: 68 }
               ],
             }
           ]}
         >
           <Image
-            source={require('../assets/Onboarding photo.png')}
+            source={require('../Images/Onboarding photo.png')}
             style={styles.largeImage}
-            contentFit="contain"
+            contentFit="cover"
           />
         </Animated.View>
 
@@ -159,14 +242,7 @@ export default function LandingPage() {
             enableHaptics={true}
           />
 
-          {/* Temporary Dev Button - Dating Intentions Page */}
-          <TouchableOpacity
-            style={styles.devButton}
-            onPress={() => router.push('/(onboarding)/mascot-phase4')}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.devButtonText}>🚧 Dev: Phase 4 Page</Text>
-          </TouchableOpacity>
+          {/* Dev button removed per request */}
         </Animated.View>
       </SafeAreaView>
     </View>
@@ -209,13 +285,11 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 20, // sm spacing for edge padding
+    paddingHorizontal: 0,
   },
   largeImage: {
-    width: width * 0.95, // Increased from 90% to 95% of screen width
-    height: width * 0.95, // Square aspect ratio
-    maxWidth: 450, // Increased from 400
-    maxHeight: 450, // Increased from 400
+    width: '100%',
+    height: '100%',
   },
   
   // Action Buttons - Professional Design
@@ -291,21 +365,5 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#6B7280',
   },
-  devButton: {
-    backgroundColor: '#F3F4F6', // Light gray background
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 16,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-  },
-  devButtonText: {
-    color: '#6B7280', // Secondary text color
-    fontSize: 14,
-    fontWeight: '500',
-    fontFamily: Fonts.regular,
-  },
+  
 });

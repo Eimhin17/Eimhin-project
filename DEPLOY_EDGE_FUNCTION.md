@@ -33,6 +33,10 @@ supabase link --project-ref tagjfsxeutihwntpudsk
 ```bash
 # Deploy the email verification function
 supabase functions deploy send-verification-email
+
+Also deploy the push notification sender function:
+
+supabase functions deploy send-push
 ```
 
 ### **Step 5: Verify Deployment**
@@ -42,6 +46,7 @@ supabase functions list
 
 # Check function logs
 supabase functions logs send-verification-email
+supabase functions logs send-push
 ```
 
 ## **⚙️ Alternative: Deploy via Dashboard**

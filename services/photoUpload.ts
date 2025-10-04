@@ -46,7 +46,7 @@ export class PhotoUploadService {
       // Get signed URL for private access
       const { data: signedUrlData, error: signedUrlError } = await supabase.storage
         .from('user-photos')
-        .createSignedUrl(fileName, 3600); // 1 hour expiry
+        .createSignedUrl(fileName, 86400); // 24 hour expiry for faster subsequent loads
 
       if (signedUrlError) {
         console.error('❌ Failed to create signed URL:', signedUrlError);
@@ -96,10 +96,35 @@ export class PhotoUploadService {
       const username = profile.username;
       console.log(`📸 Using username folder: ${username}`);
 
+      // Determine existing indices in storage to avoid overwriting by index
+      const { data: existingFiles, error: listError } = await supabase.storage
+        .from('user-photos')
+        .list(username, { limit: 100, sortBy: { column: 'created_at', order: 'asc' } });
+
+      if (listError) {
+        console.warn('⚠️ Could not list existing photos to compute next indices:', listError);
+      }
+
+      const usedIndices = new Set<number>();
+      (existingFiles || []).forEach((file) => {
+        const idx = parseInt(file.name.split('-')[0], 10);
+        if (!isNaN(idx)) usedIndices.add(idx);
+      });
+
+      const nextAvailableIndex = () => {
+        let i = 0;
+        while (usedIndices.has(i)) i += 1;
+        usedIndices.add(i);
+        return i;
+      };
+
+      // Upload each new photo to a free index slot to preserve all existing photos
       const results = await Promise.all(
-        photoUris.map(async (uri, index) => {
-          const result = await this.uploadPhoto(userId, username, uri, index);
-          return { index, result };
+        photoUris.map(async (uri) => {
+          const assignedIndex = nextAvailableIndex();
+          console.log(`📸 Assigning new photo to index ${assignedIndex}`);
+          const result = await this.uploadPhoto(userId, username, uri, assignedIndex);
+          return { index: assignedIndex, result };
         })
       );
 
@@ -251,7 +276,7 @@ export class PhotoUploadService {
 
       const { data, error } = await supabase.storage
         .from('user-photos')
-        .createSignedUrl(filePath, 3600); // 1 hour expiry
+        .createSignedUrl(filePath, 86400); // 24 hour expiry
 
       if (error) {
         console.error('❌ Error creating signed URL:', error);
@@ -279,14 +304,51 @@ export class PhotoUploadService {
    */
   static async refreshSignedUrls(photoUrls: string[]): Promise<string[]> {
     try {
-      const refreshedUrls = await Promise.all(
-        photoUrls.map(async (url) => {
-          const result = await this.getSignedUrl(url);
-          // Always return a URL - either the signed URL or the original as fallback
-          return result.success ? result.url! : url;
-        })
-      );
-      return refreshedUrls;
+      // Extract file paths from existing URLs (works for both signed and public storage URLs)
+      const paths: string[] = [];
+      for (const photoUrl of photoUrls) {
+        try {
+          const url = new URL(photoUrl);
+          const parts = url.pathname.split('/');
+          // Expect .../user-photos/<username>/<file>
+          const file = parts[parts.length - 1];
+          const username = parts[parts.length - 2];
+          if (username && file) {
+            paths.push(`${username}/${file}`);
+          }
+        } catch {
+          // If URL parsing fails, keep original URL
+          paths.push(photoUrl);
+        }
+      }
+
+      const realPaths = paths.filter(p => !p.startsWith('http'));
+      const passthrough = paths.filter(p => p.startsWith('http')) as string[];
+
+      let signedUrls: string[] = [];
+      if (realPaths.length > 0) {
+        const { data, error } = await supabase.storage
+          .from('user-photos')
+          .createSignedUrls(realPaths, 86400);
+        if (error) {
+          console.error('❌ Error batch refreshing signed URLs:', error);
+          // Fallback to original URLs in same order
+          return photoUrls;
+        }
+        signedUrls = (data || []).map(item => item?.signedUrl || '').filter(Boolean) as string[];
+      }
+
+      // Merge back signed + passthrough preserving original order
+      const result: string[] = [];
+      let s = 0, p = 0;
+      for (const original of paths) {
+        if (original.startsWith('http')) {
+          result.push(passthrough[p++]);
+        } else {
+          result.push(signedUrls[s++] || original);
+        }
+      }
+      return result;
     } catch (error) {
       console.error('❌ Error refreshing signed URLs:', error);
       return photoUrls; // Return original URLs if refresh fails
@@ -382,25 +444,20 @@ export class PhotoUploadService {
         imageFiles.splice(0, imageFiles.length, ...cleanedFiles);
       }
 
-      // Get signed URLs for each photo
-      const photoUrls = await Promise.all(
-        imageFiles.map(async (file) => {
-          const filePath = `${username}/${file.name}`;
-          const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-            .from('user-photos')
-            .createSignedUrl(filePath, 3600); // 1 hour expiry
+      // Build file paths and create signed URLs in a single batch (24h TTL)
+      const paths = imageFiles.map(file => `${username}/${file.name}`);
+      const { data: batch, error: batchError } = await supabase.storage
+        .from('user-photos')
+        .createSignedUrls(paths, 86400);
 
-          if (signedUrlError) {
-            console.error(`❌ Error creating signed URL for ${file.name}:`, signedUrlError);
-            return null;
-          }
+      if (batchError) {
+        console.error('❌ Error creating batch signed URLs:', batchError);
+        return [];
+      }
 
-          return signedUrlData.signedUrl;
-        })
-      );
-
-      // Filter out null values and return valid URLs
-      const validUrls = photoUrls.filter(url => url !== null) as string[];
+      const validUrls = (batch || [])
+        .map(item => item?.signedUrl || null)
+        .filter(Boolean) as string[];
       console.log(`✅ Loaded ${validUrls.length} photos successfully`);
       
       return validUrls;

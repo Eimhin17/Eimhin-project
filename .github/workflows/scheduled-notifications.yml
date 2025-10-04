@@ -1,0 +1,57 @@
+name: Scheduled Notifications
+
+on:
+  schedule:
+    # Daily engagement - 2 PM GMT
+    - cron: '0 14 * * *'
+    # Prime time - 7 PM GMT
+    - cron: '0 19 * * *'
+    # Re-engagement - 11 PM GMT
+    - cron: '0 23 * * *'
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      notification_type:
+        description: 'Notification type'
+        required: true
+        default: 'daily'
+        type: choice
+        options:
+          - daily
+          - weekly
+          - re_engagement
+          - prime_time
+
+jobs:
+  send-notifications:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Determine notification type
+        id: type
+        run: |
+          # Get current hour
+          HOUR=$(date -u +%H)
+
+          # Manual trigger
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "type=${{ inputs.notification_type }}" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Determine type based on schedule
+          if [ "$HOUR" = "14" ]; then
+            echo "type=daily" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" = "19" ]; then
+            echo "type=prime_time" >> $GITHUB_OUTPUT
+          elif [ "$HOUR" = "23" ]; then
+            echo "type=re_engagement" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Send scheduled notifications
+        run: |
+          curl -X POST '${{ secrets.SUPABASE_URL }}/functions/v1/scheduled-notifications' \
+            -H 'Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}' \
+            -H 'Content-Type: application/json' \
+            -d '{"type": "${{ steps.type.outputs.type }}"}'

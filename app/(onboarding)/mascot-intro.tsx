@@ -1,39 +1,50 @@
 import React, { useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
   Animated,
-  Dimensions
+  Dimensions,
+  Easing
 } from 'react-native';
 import { router } from 'expo-router';
 import { Image } from 'expo-image';
-import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
 import { BackButton } from '../../components/ui';
-import { AnimatedTextButton } from '../../components/ui/AnimatedButton';
+import { useContinueButtonAnimation } from '../../utils/continueButtonAnimation';
+import { playLightHaptic } from '../../utils/haptics';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
 
 const { width, height } = Dimensions.get('window');
 
 export default function MascotIntroScreen() {
+  const { setCurrentStep } = useOnboarding();
+
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const buttonOpacity = useRef(new Animated.Value(0)).current;
   const buttonSlideUp = useRef(new Animated.Value(50)).current;
-  const progressFillAnim = useRef(new Animated.Value(0)).current;
-  
+
   // Back button animation
   const backButtonScale = useRef(new Animated.Value(1)).current;
 
+  // Continue button animation
+  const { buttonScale, buttonHighlightAnim, triggerButtonPress } = useContinueButtonAnimation();
+
   useEffect(() => {
+    // Register this step for resume functionality
+    setCurrentStep(ONBOARDING_STEPS.MASCOT_INTRO);
+
     // Staggered entrance animations
     Animated.sequence([
       Animated.parallel([
@@ -69,16 +80,18 @@ export default function MascotIntroScreen() {
   }, []);
 
   const handleContinue = () => {
-    router.push('/(onboarding)/school-selection');
+    triggerButtonPress(() => {
+      router.push('/(onboarding)/school-selection');
+    });
   };
 
   const handleBackPress = () => {
-    router.back();
+    safeGoBack(ONBOARDING_STEPS.MASCOT_INTRO);
   };
 
   return (
     <SafeAreaView style={styles.container}>
-      <KeyboardAvoidingView 
+      <KeyboardAvoidingView
         style={styles.keyboardAvoidingView}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
@@ -124,28 +137,46 @@ export default function MascotIntroScreen() {
         </ScrollView>
 
         {/* Continue Button */}
-        <View style={styles.buttonContainer}>
-          <Animated.View 
-            style={[
-              styles.buttonWrapper, 
-              { 
-                opacity: buttonOpacity,
-                transform: [{ translateY: buttonSlideUp }]
-              }
-            ]}
-          >
-            <AnimatedTextButton
-              text="Continue"
-              onPress={handleContinue}
+        <Animated.View style={[styles.buttonContainer, { opacity: buttonOpacity, transform: [{ translateY: buttonSlideUp }] }]}>
+          <Animated.View style={{ transform: [{ scale: buttonScale }] }}>
+            <TouchableOpacity
               style={styles.continueButton}
-              textStyle={styles.continueButtonText}
-              rippleColor="rgba(255, 255, 255, 0.3)"
-              borderRadius={16}
-              hapticType={Haptics.ImpactFeedbackStyle.Heavy}
-              enableHaptics={true}
-            />
+              onPress={handleContinue}
+              activeOpacity={0.8}
+            >
+              <Animated.View
+                pointerEvents="none"
+                style={[
+                  styles.buttonHighlight,
+                  {
+                    opacity: buttonHighlightAnim.interpolate({
+                      inputRange: [0, 0.2, 0.8, 1],
+                      outputRange: [0, 0.45, 0.25, 0],
+                    }),
+                    transform: [
+                      {
+                        translateX: buttonHighlightAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-220, 220],
+                        }),
+                      },
+                    ],
+                  },
+                ]}
+              >
+                <LinearGradient
+                  colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                  start={{ x: 0, y: 0.5 }}
+                  end={{ x: 1, y: 0.5 }}
+                  style={styles.buttonHighlightGradient}
+                />
+              </Animated.View>
+              <Text style={styles.continueButtonText}>
+                Continue
+              </Text>
+            </TouchableOpacity>
           </Animated.View>
-        </View>
+        </Animated.View>
       </KeyboardAvoidingView>
     </SafeAreaView>
   );
@@ -233,15 +264,11 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     position: 'absolute',
-    bottom: 0,
+    bottom: SPACING.lg,
     left: 0,
     right: 0,
-    paddingHorizontal: 32, // xl spacing from design system (matches first mascot)
-    paddingBottom: 48, // 2xl spacing from design system (matches first mascot)
+    paddingHorizontal: SPACING.xl, // xl spacing from design system (matches basic-details)
     backgroundColor: 'transparent',
-  },
-  buttonWrapper: {
-    // Wrapper for animation
   },
   continueButton: {
     backgroundColor: '#FF4F81', // Primary pink from design system
@@ -251,6 +278,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 56, // From design system primary button spec
+    width: '100%',
+    overflow: 'hidden',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
@@ -263,6 +292,16 @@ const styles = StyleSheet.create({
         shadowColor: '#FF4F81',
       },
     }),
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
   continueButtonText: {
     fontFamily: Fonts.semiBold, // Poppins SemiBold from design system

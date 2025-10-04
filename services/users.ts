@@ -131,44 +131,42 @@ export class UserService {
   }
 
   // Add user interests
-  static async addUserInterests(userId: string, interestIds: string[]): Promise<{ interests: UserInterest[] | null; error: string | null }> {
+  static async addUserInterests(userId: string, interestNames: string[]): Promise<{ interests: string[] | null; error: string | null }> {
     try {
-      const interestData = interestIds.map(interestId => ({
-        user_id: userId,
-        interest_id: interestId,
-      }));
-
+      // Update the interests in the profiles table
       const { data, error } = await supabase
-        .from('user_interests')
-        .insert(interestData)
-        .select();
+        .from('profiles')
+        .update({
+          interests: interestNames,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', userId)
+        .select('interests');
 
       if (error) {
         return { interests: null, error: error.message };
       }
 
-      return { interests: data, error: null };
+      return { interests: data?.[0]?.interests || [], error: null };
     } catch (error) {
       return { interests: null, error: 'An unexpected error occurred' };
     }
   }
 
   // Get user interests
-  static async getUserInterests(userId: string): Promise<{ interests: any[] | null; error: string | null }> {
+  static async getUserInterests(userId: string): Promise<{ interests: string[] | null; error: string | null }> {
     try {
       const { data, error } = await supabase
-        .from('user_interests')
-        .select(`
-          *,
-          interests (*)
-        `)
-        .eq('user_id', userId);
+        .from('profiles')
+        .select('interests')
+        .eq('id', userId)
+        .single();
 
       if (error) {
         return { interests: null, error: error.message };
       }
 
-      return { interests: data, error: null };
+      return { interests: data?.interests || [], error: null };
     } catch (error) {
       return { interests: null, error: 'An unexpected error occurred' };
     }
@@ -211,10 +209,7 @@ export class UserService {
         .from('profiles')
         .select(`
           *,
-          user_photos (*),
-          user_interests (
-            interests (*)
-          )
+          user_photos (*)
         `)
         .eq('status', 'active')
         .eq('email_verified', true)

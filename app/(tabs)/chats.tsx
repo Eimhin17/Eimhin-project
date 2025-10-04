@@ -1,5 +1,6 @@
 import * as React from 'react';
 import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, FlatList, Animated, RefreshControl } from 'react-native';
+import { Image } from 'expo-image';
 import { router, useFocusEffect } from 'expo-router';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -8,20 +9,27 @@ import { ChatService } from '../../services/chat';
 import { ChatMatch, ChatMessage } from '../../lib/supabase';
 import { CircularProfilePicture } from '../../components/CircularProfilePicture';
 import { useProfilePreloader } from '../../hooks/useProfilePreloader';
+import { useTabPreloader } from '../../hooks/useTabPreloader';
+import { tabPreloader } from '../../services/tabPreloader';
+import { dataCache, CACHE_NAMESPACES } from '../../services/dataCache';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
 
 export default function ChatsScreen() {
   const [chats, setChats] = React.useState<ChatMatch[]>([]);
-  const [loading, setLoading] = React.useState(true);
+  const [loading, setLoading] = React.useState(false); // Changed to false for instant UI
   const [refreshing, setRefreshing] = React.useState(false);
   const [currentUserId, setCurrentUserId] = React.useState<string | null>(null);
+  const [initialLoadComplete, setInitialLoadComplete] = React.useState(false);
 
   // Preload first profile for instant swiping screen
-  useProfilePreloader({ 
-    shouldPreload: true, 
-    pageName: 'chats' 
+  useProfilePreloader({
+    shouldPreload: true,
+    pageName: 'chats'
   });
+
+  // Preload adjacent tab data
+  useTabPreloader({ currentTab: 'chats' });
 
   // Get current user ID on component mount
   React.useEffect(() => {
@@ -30,40 +38,69 @@ export default function ChatsScreen() {
         const { data: { user } } = await supabase.auth.getUser();
         if (user) {
           setCurrentUserId(user.id);
-          await loadChats(user.id);
+
+          // Try cache first (most recent)
+          const cachedChats = dataCache.get<ChatMatch[]>(CACHE_NAMESPACES.CHAT_MATCHES, user.id);
+          if (cachedChats && cachedChats.length > 0) {
+            console.log('⚡ Using cached chats data');
+            setChats(sortChatsByActivity(cachedChats));
+            setInitialLoadComplete(true);
+            // Refresh in background
+            loadChats(user.id);
+            return;
+          }
+
+          // Check for preloaded data second
+          const preloadedChats = tabPreloader.getPreloadedChats();
+          if (preloadedChats && preloadedChats.length > 0) {
+            console.log('⚡ Using preloaded chats data');
+            setChats(sortChatsByActivity(preloadedChats));
+            setInitialLoadComplete(true);
+            // Still load fresh data in background
+            loadChats(user.id);
+          } else {
+            // Load chats in background without blocking UI
+            loadChats(user.id);
+          }
         }
       } catch (error) {
         console.error('Error getting current user:', error);
-      } finally {
-        setLoading(false);
       }
     };
 
     getCurrentUser();
   }, []);
 
-  // Refresh chats when the screen comes into focus
+  // Refresh chats when the screen comes into focus (only after initial load)
   useFocusEffect(
     React.useCallback(() => {
-      if (currentUserId) {
-        console.log('🔄 Chats screen focused, refreshing matches...');
+      if (currentUserId && initialLoadComplete) {
+        console.log('🔄 Chats screen focused, refreshing matches in background...');
         loadChats(currentUserId);
       }
-    }, [currentUserId])
+    }, [currentUserId, initialLoadComplete])
   );
+
+  // Helper: sort chats by latest activity (last message or match time)
+  const sortChatsByActivity = (list: ChatMatch[]) => {
+    return [...list].sort((a, b) => {
+      const aTime = new Date(a.last_message?.created_at || a.matched_at || 0).getTime();
+      const bTime = new Date(b.last_message?.created_at || b.matched_at || 0).getTime();
+      return bTime - aTime;
+    });
+  };
 
   // Load chats from Supabase
   const loadChats = async (userId: string) => {
     try {
       console.log('🔄 Loading chats for user:', userId);
-      setLoading(true);
       const matches = await ChatService.getMatches(userId);
       console.log('✅ Loaded matches:', matches.length);
-      setChats(matches);
+      setChats(sortChatsByActivity(matches));
+      setInitialLoadComplete(true);
     } catch (error) {
       console.error('❌ Error loading chats:', error);
-    } finally {
-      setLoading(false);
+      setInitialLoadComplete(true);
     }
   };
 
@@ -102,8 +139,8 @@ export default function ChatsScreen() {
     // Subscribe to new messages for all matches
     const subscriptions = chats.map(chat => 
       ChatService.subscribeToMessages(chat.id, (newMessage) => {
-        setChats(prevChats => 
-          prevChats.map(prevChat => {
+        setChats(prevChats => {
+          const updated = prevChats.map(prevChat => {
             if (prevChat.id === chat.id) {
               return {
                 ...prevChat,
@@ -112,8 +149,9 @@ export default function ChatsScreen() {
               };
             }
             return prevChat;
-          })
-        );
+          });
+          return sortChatsByActivity(updated);
+        });
       })
     );
 
@@ -142,7 +180,7 @@ export default function ChatsScreen() {
   const renderChatItem = ({ item }: { item: ChatMatch }) => {
     const otherUserFirstName = item.other_user.first_name;
     const lastMessageText = item.last_message?.content || 'Start a conversation!';
-    const lastMessageTime = item.last_message?.created_at 
+    const lastMessageTime = item.last_message?.created_at
       ? formatTimeAgo(item.last_message.created_at)
       : formatTimeAgo(item.matched_at);
 
@@ -161,7 +199,7 @@ export default function ChatsScreen() {
           <View style={styles.avatarContainer}>
             <CircularProfilePicture
               userId={item.other_user.id}
-              size={50}
+              size={60}
               fallbackIcon={
                 <Text style={styles.avatarText}>
                   {otherUserFirstName?.charAt(0)?.toUpperCase() || '?'}
@@ -170,19 +208,19 @@ export default function ChatsScreen() {
             />
             {item.other_user.id === currentUserId && <View style={styles.onlineIndicator} />}
           </View>
-          
+
           <View style={styles.chatInfo}>
             <View style={styles.chatHeader}>
               <Text style={styles.chatName}>{otherUserFirstName}</Text>
               <Text style={styles.chatTime}>{lastMessageTime}</Text>
             </View>
-            
+
             <View style={styles.messageContainer}>
               <Text style={styles.lastMessage} numberOfLines={2}>
                 {item.last_message?.sender_id === currentUserId ? 'You: ' : ''}
                 {lastMessageText}
               </Text>
-              
+
               {item.unread_count > 0 && (
                 <View style={styles.unreadBadge}>
                   <Text style={styles.unreadCount}>{item.unread_count}</Text>
@@ -208,48 +246,6 @@ export default function ChatsScreen() {
     return messageTime.toLocaleDateString();
   };
 
-  // Loading state
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <View style={styles.headerCenter}>
-            <View style={styles.headerTitleContainer}>
-              <Text style={styles.headerTitlePink}>Mes</Text>
-              <Text style={styles.headerTitlePurple}>sages</Text>
-            </View>
-          </View>
-        </View>
-        <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading chats...</Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
-  // Empty state
-  if (chats.length === 0) {
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.header}>
-          <View style={styles.headerCenter}>
-            <View style={styles.headerTitleContainer}>
-              <Text style={styles.headerTitlePink}>Mes</Text>
-              <Text style={styles.headerTitlePurple}>sages</Text>
-            </View>
-          </View>
-        </View>
-        <View style={styles.emptyState}>
-          <Ionicons name="chatbubbles-outline" size={48} color="#c3b1e1" />
-          <Text style={styles.emptyTitle}>No matches yet</Text>
-          <Text style={styles.emptySubtitle}>
-            Start swiping to find your perfect match! When you both like each other, you'll be able to chat here.
-          </Text>
-        </View>
-      </SafeAreaView>
-    );
-  }
-
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.header}>
@@ -260,23 +256,35 @@ export default function ChatsScreen() {
           </View>
         </View>
       </View>
-      
-      <FlatList
-        data={chats}
-        renderItem={renderChatItem}
-        keyExtractor={(item) => item.id}
-        style={styles.chatList}
-        contentContainerStyle={styles.chatListContent}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
-            colors={['#FF4F81']}
-            tintColor="#FF4F81"
+
+      {/* Main content - show chats list or idle image */}
+      <View style={styles.mainContent}>
+        {chats.length === 0 ? (
+          <Image
+            // Using matches idle state until messages asset is provided
+            source={require('../../Images/matches idle state.png')}
+            style={styles.idleImage}
+            contentFit="contain"
           />
-        }
-        showsVerticalScrollIndicator={false}
-      />
+        ) : (
+          <FlatList
+            data={chats}
+            renderItem={renderChatItem}
+            keyExtractor={(item) => item.id}
+            style={styles.chatList}
+            contentContainerStyle={styles.chatListContent}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                colors={['#FF4F81']}
+                tintColor="#FF4F81"
+              />
+            }
+            showsVerticalScrollIndicator={false}
+          />
+        )}
+      </View>
     </SafeAreaView>
   );
 }
@@ -286,10 +294,13 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#FFFFFF',
   },
+  mainContent: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+  },
   header: {
     backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: 0,
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
   },
@@ -331,20 +342,22 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 4,
     elevation: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 79, 129, 0.35)',
   },
   chatItemGradient: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: SPACING.md,
+    paddingVertical: SPACING.lg,
     paddingHorizontal: SPACING.lg,
     borderRadius: BORDER_RADIUS.lg,
   },
   avatarContainer: {
     position: 'relative',
-    marginRight: SPACING.md,
+    marginRight: SPACING.lg,
   },
   avatarText: {
-    fontSize: 20,
+    fontSize: 24,
     fontWeight: 'bold',
     color: '#FF4F81',
   },
@@ -426,6 +439,11 @@ const styles = StyleSheet.create({
     color: '#6B7280',
     textAlign: 'center',
     lineHeight: 24,
+  },
+  idleImage: {
+    width: '100%',
+    height: '100%',
+    transform: [{ translateY: 12 }],
   },
   loadingContainer: {
     flex: 1,

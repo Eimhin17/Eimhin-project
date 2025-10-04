@@ -2,7 +2,13 @@ const { createClient } = require('@supabase/supabase-js');
 
 // Supabase configuration with SERVICE ROLE KEY for admin operations
 const supabaseUrl = 'https://tagjfsxeutihwntpudsk.supabase.co';
-const supabaseServiceKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRhZ2pmc3hldXRpaHdudHB1ZHNrIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1NDUxOTA3OCwiZXhwIjoyMDcwMDk1MDc4fQ.yrYprmDqWm02TOLR_eJEPBTF8wprvxuM8Qpu2Jonoqo';
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+if (!supabaseServiceKey) {
+  console.error('❌ Missing SUPABASE_SERVICE_ROLE_KEY environment variable.');
+  console.error('   Please set SUPABASE_SERVICE_ROLE_KEY before running this script.');
+  process.exit(1);
+}
 
 const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   auth: {

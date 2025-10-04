@@ -12,6 +12,7 @@ import {
   Image,
   TextInput,
   Dimensions,
+  Animated,
 } from 'react-native';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -21,6 +22,7 @@ import { supabase } from '../lib/supabase';
 import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import { BackButton } from './ui';
+import { playLightHaptic } from '../utils/haptics';
 
 interface ReportProfileModalProps {
   visible: boolean;
@@ -52,6 +54,8 @@ export default function ReportProfileModal({
   const [isUploadingImage, setIsUploadingImage] = useState(false);
   
   const modalRef = useRef<View>(null);
+  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const backButtonOpacity = useRef(new Animated.Value(1)).current;
 
   const handleCategorySelect = (categoryId: string) => {
     setSelectedCategory(categoryId);
@@ -228,6 +232,22 @@ export default function ReportProfileModal({
     onClose();
   };
 
+  const handleAnimatedClose = () => {
+    if (isSubmitting) return;
+    playLightHaptic();
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, { toValue: 0.85, duration: 90, useNativeDriver: true }),
+      Animated.timing(backButtonScale, { toValue: 0.92, duration: 90, useNativeDriver: true }),
+    ]).start(() => {
+      Animated.parallel([
+        Animated.timing(backButtonOpacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+        Animated.timing(backButtonScale, { toValue: 1, duration: 140, useNativeDriver: true }),
+      ]).start(() => {
+        handleClose();
+      });
+    });
+  };
+
   return (
     <Modal
       visible={visible}
@@ -238,7 +258,11 @@ export default function ReportProfileModal({
       <SafeAreaView style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <BackButton onPress={handleClose} />
+          <View style={styles.backButtonWrapper}>
+            <Animated.View style={{ transform: [{ scale: backButtonScale }], opacity: backButtonOpacity }}>
+              <BackButton onPress={handleAnimatedClose} size={60} iconSize={28} />
+            </Animated.View>
+          </View>
           <View style={styles.headerTitleContainer}>
             <Text style={styles.headerTitle}>Report Profile</Text>
           </View>
@@ -408,6 +432,10 @@ const styles = StyleSheet.create({
     paddingVertical: SPACING.md,
     minHeight: 60,
     position: 'relative',
+  },
+  backButtonWrapper: {
+    marginLeft: -SPACING.lg,
+    zIndex: 2,
   },
   headerTitleContainer: {
     position: 'absolute',

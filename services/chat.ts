@@ -1,6 +1,8 @@
 import { supabase } from '../lib/supabase';
 import { ChatMessage, ChatMatch, TypingStatus } from '../lib/supabase';
 import { CompatibleEncryptionService } from './compatibleEncryption';
+import { dataCache, CACHE_NAMESPACES, CACHE_TTL } from './dataCache';
+import { sendPushNotification } from './notifications';
 
 export class ChatService {
   // Get all matches for the current user
@@ -32,7 +34,7 @@ export class ChatService {
         userIds.add(match.user2_id);
       });
 
-      // Fetch user details
+      // Fetch user details (only completed profiles for defensive security)
       const { data: users, error: usersError } = await supabase
         .from('profiles')
         .select(`
@@ -42,23 +44,17 @@ export class ChatService {
           school_id,
           schools (school_name)
         `)
-        .in('id', Array.from(userIds));
+        .in('id', Array.from(userIds))
+        .eq('profile_completed', true)
+        .eq('status', 'active');
 
       if (usersError) {
         console.error('❌ Error fetching users:', usersError);
         throw usersError;
       }
 
-      // Fetch photos separately
-      const { data: photos, error: photosError } = await supabase
-        .from('user_photos')
-        .select('user_id, photo_url, is_primary')
-        .in('user_id', Array.from(userIds));
-
-      if (photosError) {
-        console.error('❌ Error fetching photos:', photosError);
-        // Don't throw error, just continue without photos
-      }
+      // Fetch photos from storage buckets
+      const photos = await this.getUserPhotosFromStorage(Array.from(userIds));
 
       // Create a users map for easy lookup
       const usersMap = new Map();
@@ -88,7 +84,7 @@ export class ChatService {
       const transformedMatches: ChatMatch[] = matchesWithUsers?.map(match => {
         const isUser1 = match.user1_id === userId;
         const otherUser = isUser1 ? match.user2 : match.user1;
-        
+
         return {
           id: match.id,
           user1_id: match.user1_id,
@@ -108,15 +104,45 @@ export class ChatService {
         };
       }) || [];
 
-      // Get last message and unread count for each match
-      for (const match of transformedMatches) {
-        const { data: lastMessage } = await supabase
+      // OPTIMIZATION: Batch fetch all last messages and unread counts in parallel
+      const matchIds = transformedMatches.map(m => m.id);
+
+      // Fetch last messages for all matches in parallel
+      const lastMessagesPromises = matchIds.map(matchId =>
+        supabase
           .from('messages')
           .select('*')
-          .eq('match_id', match.id)
+          .eq('match_id', matchId)
           .order('created_at', { ascending: false })
-          .limit(1);
+          .limit(1)
+      );
 
+      // Fetch unread counts for all matches in parallel
+      const unreadCountsPromises = matchIds.map(matchId =>
+        supabase
+          .from('messages')
+          .select('*', { count: 'exact', head: true })
+          .eq('match_id', matchId)
+          .eq('is_read', false)
+          .neq('sender_id', userId)
+      );
+
+      // Execute all queries in parallel
+      const [lastMessagesResults, unreadCountsResults] = await Promise.all([
+        Promise.all(lastMessagesPromises),
+        Promise.all(unreadCountsPromises)
+      ]);
+
+      // Process results
+      for (let i = 0; i < transformedMatches.length; i++) {
+        const match = transformedMatches[i];
+        const { data: lastMessage } = lastMessagesResults[i];
+        const { count: unreadCount } = unreadCountsResults[i];
+
+        // Set unread count
+        match.unread_count = unreadCount || 0;
+
+        // Process last message
         if (lastMessage && lastMessage.length > 0) {
           // Decrypt the last message content
           let decryptedContent = lastMessage[0].content;
@@ -173,19 +199,13 @@ export class ChatService {
             sender_avatar: '👤'
           };
         }
-
-        // Get unread count
-        const { count: unreadCount } = await supabase
-          .from('messages')
-          .select('*', { count: 'exact', head: true })
-          .eq('match_id', match.id)
-          .eq('is_read', false)
-          .neq('sender_id', userId);
-
-        match.unread_count = unreadCount || 0;
       }
 
       console.log('✅ Transformed matches:', transformedMatches.length);
+
+      // Cache the results for quick access
+      dataCache.set(CACHE_NAMESPACES.CHAT_MATCHES, userId, transformedMatches, CACHE_TTL.CHAT_DATA);
+
       return transformedMatches;
     } catch (error) {
       console.error('❌ Error fetching matches:', error);
@@ -194,8 +214,17 @@ export class ChatService {
   }
 
   // Get messages for a specific match
-  static async getMessages(matchId: string): Promise<ChatMessage[]> {
+  static async getMessages(matchId: string, forceRefresh: boolean = false): Promise<ChatMessage[]> {
     try {
+      // Check cache first unless force refresh
+      if (!forceRefresh) {
+        const cached = dataCache.get<ChatMessage[]>(CACHE_NAMESPACES.CHAT_MESSAGES, matchId);
+        if (cached) {
+          console.log('⚡ Using cached messages for match:', matchId);
+          return cached;
+        }
+      }
+
       const { data: messages, error } = await supabase
         .from('messages')
         .select('*')
@@ -280,11 +309,24 @@ export class ChatService {
         }) || []
       );
 
+      // Cache the processed messages
+      dataCache.set(CACHE_NAMESPACES.CHAT_MESSAGES, matchId, processedMessages, CACHE_TTL.CHAT_DATA);
+
       return processedMessages;
     } catch (error) {
       console.error('Error fetching messages:', error);
       return [];
     }
+  }
+
+  // Invalidate message cache when new message is sent
+  static invalidateMessageCache(matchId: string): void {
+    dataCache.delete(CACHE_NAMESPACES.CHAT_MESSAGES, matchId);
+  }
+
+  // Invalidate chat matches cache
+  static invalidateChatMatchesCache(userId: string): void {
+    dataCache.delete(CACHE_NAMESPACES.CHAT_MATCHES, userId);
   }
 
   // Send a message
@@ -347,6 +389,42 @@ export class ChatService {
       }
 
       console.log('✅ Message sent successfully:', message);
+
+      // Invalidate message cache so it gets refreshed
+      this.invalidateMessageCache(matchId as string);
+
+      // Send push notification to the recipient
+      try {
+        const recipientId = match.user1_id === user.id ? match.user2_id : match.user1_id;
+
+        // Get sender's profile for notification
+        const { data: senderProfile } = await supabase
+          .from('profiles')
+          .select('first_name')
+          .eq('id', user.id)
+          .single();
+
+        if (senderProfile) {
+          // Truncate message if too long
+          const previewText = messageText.length > 50
+            ? messageText.substring(0, 47) + '...'
+            : messageText;
+
+          await sendPushNotification(
+            recipientId,
+            `💬 ${senderProfile.first_name}`,
+            previewText,
+            {
+              type: 'new_message',
+              match_id: matchId,
+              sender_id: user.id
+            }
+          );
+        }
+      } catch (notifError) {
+        console.error('Error sending message notification:', notifError);
+        // Don't fail the message send if notification fails
+      }
 
       return {
         ...message,
@@ -508,21 +586,113 @@ export class ChatService {
     }
   }
 
-  // Get user's primary photo
+  // Get user's primary photo from storage
   static async getUserPhoto(userId: string): Promise<string | null> {
     try {
-      const { data: photos, error } = await supabase
-        .from('user_photos')
-        .select('photo_url')
-        .eq('user_id', userId)
-        .eq('is_primary', true)
+      // Get user's username first
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('username')
+        .eq('id', userId)
         .single();
 
-      if (error) throw error;
-      return photos?.photo_url || null;
+      if (profileError || !profile?.username) {
+        console.error('❌ Error fetching username for photos:', profileError);
+        return null;
+      }
+
+      // List files in the user's photos folder
+      const { data: files, error: listError } = await supabase.storage
+        .from('user-photos')
+        .list(profile.username, {
+          limit: 1,
+          sortBy: { column: 'created_at', order: 'asc' }
+        });
+
+      if (listError || !files || files.length === 0) {
+        return null;
+      }
+
+      // Get the first photo (primary photo)
+      const primaryPhoto = files[0];
+      const filePath = `${profile.username}/${primaryPhoto.name}`;
+
+      // Create signed URL for the photo
+      const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+        .from('user-photos')
+        .createSignedUrl(filePath, 3600); // 1 hour expiry
+
+      if (signedUrlError) {
+        console.error('❌ Error creating signed URL for photo:', signedUrlError);
+        return null;
+      }
+
+      return signedUrlData.signedUrl;
     } catch (error) {
       console.error('Error fetching user photo:', error);
       return null;
+    }
+  }
+
+  // Get photos for multiple users from storage
+  static async getUserPhotosFromStorage(userIds: string[]): Promise<any[]> {
+    try {
+      const photos: any[] = [];
+
+      // Get usernames for all user IDs
+      const { data: profiles, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .in('id', userIds);
+
+      if (profilesError || !profiles) {
+        console.error('❌ Error fetching usernames for photos:', profilesError);
+        return [];
+      }
+
+      // Fetch photos for each user
+      for (const profile of profiles) {
+        if (!profile.username) continue;
+
+        try {
+          const { data: files, error: listError } = await supabase.storage
+            .from('user-photos')
+            .list(profile.username, {
+              limit: 10,
+              sortBy: { column: 'created_at', order: 'asc' }
+            });
+
+          if (listError || !files || files.length === 0) {
+            continue;
+          }
+
+          // Create signed URLs for each photo
+          for (let i = 0; i < files.length; i++) {
+            const file = files[i];
+            const filePath = `${profile.username}/${file.name}`;
+
+            const { data: signedUrlData, error: signedUrlError } = await supabase.storage
+              .from('user-photos')
+              .createSignedUrl(filePath, 3600);
+
+            if (!signedUrlError && signedUrlData) {
+              photos.push({
+                user_id: profile.id,
+                photo_url: signedUrlData.signedUrl,
+                is_primary: i === 0 // First photo is primary
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`❌ Error fetching photos for user ${profile.username}:`, error);
+          continue;
+        }
+      }
+
+      return photos;
+    } catch (error) {
+      console.error('❌ Error in getUserPhotosFromStorage:', error);
+      return [];
     }
   }
 

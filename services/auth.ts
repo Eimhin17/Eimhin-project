@@ -867,6 +867,11 @@ export class AuthService {
       const { data: { user: authUser }, error: authError } = await supabase.auth.getUser();
 
       if (authError) {
+        // Handle "Auth session missing" gracefully (user just hasn't signed in yet)
+        if (authError.message?.includes('Auth session missing') || authError.message?.includes('session_missing')) {
+          console.log('ℹ️ No auth session found (user not authenticated)');
+          return { user: null };
+        }
         console.error('❌ Error getting current auth user:', authError);
         return { user: null, error: authError.message };
       }
@@ -1143,7 +1148,8 @@ export class AuthService {
       console.log('🔐 AuthService.resetPassword called for:', email);
 
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: 'debsmatch://reset-password',
+        // Use native app deep link (TestFlight build), not Expo dev URL
+        redirectTo: 'debsmatch://auth/reset-password',
       });
 
       if (error) {
@@ -1172,8 +1178,13 @@ export class AuthService {
       });
 
       if (error) {
-        console.error('❌ Password update error:', error);
-        return { success: false, error: error.message };
+        // Allow duplicate passwords: treat same-as-old as success/no-op
+        if (typeof error.message === 'string' && error.message.includes('New password should be different from the old password')) {
+          console.log('ℹ️ Password unchanged (same as old). Treating as success.');
+        } else {
+          console.error('❌ Password update error:', error);
+          return { success: false, error: error.message };
+        }
       }
 
       console.log('✅ Password updated successfully');

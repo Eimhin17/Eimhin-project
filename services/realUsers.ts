@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { shuffleArray } from '../utils/shuffleArray';
 
 export interface RealUserProfile {
   id: string;
@@ -14,6 +15,7 @@ export interface RealUserProfile {
   county?: string;
   status: string;
   onboarding_completed: boolean;
+  profile_completed: boolean;
   created_at: string;
   // New schema fields
   looking_for_friends_or_dates?: string;
@@ -50,6 +52,7 @@ export class RealUserService {
           county,
           status,
           onboarding_completed,
+          profile_completed,
           updated_at,
           looking_for_friends_or_dates,
           relationship_status,
@@ -58,7 +61,8 @@ export class RealUserService {
           blocked_schools
         `)
         .eq('status', 'active')
-        .eq('onboarding_completed', true);
+        .eq('onboarding_completed', true)
+        .eq('profile_completed', true);
 
       // Exclude current user if provided
       if (excludeUserId) {
@@ -73,7 +77,9 @@ export class RealUserService {
       }
 
       // Transform the data to match our interface
-      const transformedProfiles: RealUserProfile[] = profiles?.map(profile => ({
+      const rawProfiles = profiles ? shuffleArray(profiles) : [];
+
+      const transformedProfiles: RealUserProfile[] = rawProfiles.map(profile => ({
         id: profile.id,
         first_name: profile.first_name,
         username: profile.username,
@@ -87,11 +93,12 @@ export class RealUserService {
         county: profile.county,
         status: profile.status,
         onboarding_completed: profile.onboarding_completed,
+        profile_completed: profile.profile_completed,
         created_at: profile.updated_at,
         looking_for_friends_or_dates: profile.looking_for_friends_or_dates,
         relationship_status: profile.relationship_status,
         interests: profile.interests || [],
-        photos: [], // Photos now fetched from storage bucket
+        photos: [], // Photos fetched from storage only
         profile_prompts: profile.profile_prompts || {},
       })) || [];
 
@@ -131,6 +138,7 @@ export class RealUserService {
           county,
           status,
           onboarding_completed,
+          profile_completed,
           updated_at,
           looking_for_friends_or_dates,
           relationship_status,
@@ -140,6 +148,7 @@ export class RealUserService {
         `)
         .eq('status', 'active')
         .eq('onboarding_completed', true)
+        .eq('profile_completed', true)
         .neq('id', userId);
 
       // Exclude already swiped profiles
@@ -155,7 +164,9 @@ export class RealUserService {
       }
 
       // Transform the data
-      const transformedProfiles: RealUserProfile[] = profiles?.map(profile => ({
+      const rawProfiles = profiles ? shuffleArray(profiles) : [];
+
+      const transformedProfiles: RealUserProfile[] = rawProfiles.map(profile => ({
         id: profile.id,
         first_name: profile.first_name,
         username: profile.username,
@@ -169,11 +180,12 @@ export class RealUserService {
         county: profile.county,
         status: profile.status,
         onboarding_completed: profile.onboarding_completed,
+        profile_completed: profile.profile_completed,
         created_at: profile.updated_at,
         looking_for_friends_or_dates: profile.looking_for_friends_or_dates,
         relationship_status: profile.relationship_status,
         interests: profile.interests || [],
-        photos: [], // Photos now fetched from storage bucket
+        photos: [], // Photos fetched from storage only
         profile_prompts: profile.profile_prompts || {},
       })) || [];
 
@@ -239,11 +251,12 @@ export class RealUserService {
         county: profile.county,
         status: profile.status,
         onboarding_completed: profile.onboarding_completed,
+        profile_completed: profile.profile_completed || false,
         created_at: profile.updated_at,
         looking_for_friends_or_dates: profile.looking_for_friends_or_dates,
         relationship_status: profile.relationship_status,
         interests: profile.interests || [],
-        photos: [], // Photos now fetched from storage bucket
+        photos: [], // Photos fetched from storage only
         profile_prompts: profile.profile_prompts || {},
       };
 
@@ -276,6 +289,7 @@ export class RealUserService {
       }
 
       // List photos from storage bucket
+      console.log('📦 Listing photos from storage for username:', profile.username);
       const { data: files, error } = await supabase.storage
         .from('user-photos')
         .list(profile.username, {
@@ -284,13 +298,19 @@ export class RealUserService {
         });
 
       if (error) {
-        console.error('Error listing photos from storage:', error);
+        console.error('❌ Error listing photos from storage:', {
+          message: (error as any)?.message,
+          statusCode: (error as any)?.statusCode,
+          name: (error as any)?.name,
+        });
         return { success: false, error: 'Failed to fetch photos from storage' };
       }
 
       if (!files || files.length === 0) {
+        console.warn('⚠️ No photo files found in storage for username:', profile.username);
         return { success: true, photos: [] };
       }
+      console.log('📦 Found storage files:', files.length, 'for', profile.username);
 
       // Filter for image files and create signed URLs
       const photoFiles = files.filter(file => 
@@ -299,22 +319,32 @@ export class RealUserService {
         file.name.toLowerCase().endsWith('.png')
       );
 
-      const photoUrls = await Promise.all(
-        photoFiles.map(async (file) => {
-          const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-            .from('user-photos')
-            .createSignedUrl(`${profile.username}/${file.name}`, 3600);
+      // Build file paths and create signed URLs in a single batch with longer TTL
+      const paths = photoFiles.map(file => `${profile.username}/${file.name}`);
 
-          if (signedUrlError) {
-            console.error('Error creating signed URL for photo:', file.name, signedUrlError);
-            return null;
-          }
+      if (paths.length === 0) {
+        return { success: true, photos: [] };
+      }
 
-          return signedUrlData.signedUrl;
-        })
-      );
+      // 24 hours = 86400 seconds. Longer TTL reduces frequent refreshes on app open.
+      const { data: signedBatch, error: batchError } = await supabase.storage
+        .from('user-photos')
+        .createSignedUrls(paths, 86400);
 
-      const validUrls = photoUrls.filter(url => url !== null) as string[];
+      if (batchError) {
+        console.error('Error creating batch signed URLs:', batchError);
+        // Fallback: use raw profile photos if available
+        if (Array.isArray((profile as any).photos) && (profile as any).photos.length > 0) {
+          console.log('⚠️ Using legacy profile.photos due to signed URL failure');
+          return { success: true, photos: (profile as any).photos as string[] };
+        }
+        return { success: false, error: 'Failed to create signed URLs' };
+      }
+
+      const validUrls = (signedBatch || [])
+        .map(item => item?.signedUrl || null)
+        .filter(Boolean) as string[];
+
       return { success: true, photos: validUrls };
     } catch (error) {
       console.error('Error in getUserPhotos:', error);

@@ -38,20 +38,20 @@ class ProfilePreloaderService {
 
     try {
       console.log('🔄 Preloading first profile for user:', userId);
-      
+
       // Get passed users to exclude them
       const passedUserIds = await MatchingService.getPassedUsers(userId);
-      
+
       // Fetch the first available profile
       const result = await RealUserService.getUserProfilesForSwiping(
-        userId, 
+        userId,
         passedUserIds
       );
 
       if (result.success && result.profiles && result.profiles.length > 0) {
         const firstProfile = result.profiles[0];
         const transformedProfile = this.transformProfile(firstProfile);
-        
+
         // Load photos for the first profile
         const photosResult = await RealUserService.getUserPhotos(firstProfile.id);
         if (photosResult.success && photosResult.photos) {

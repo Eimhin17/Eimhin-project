@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,12 +8,14 @@ import {
   TouchableOpacity,
   SafeAreaView,
   Linking,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import { BackButton } from './ui';
+import { playLightHaptic } from '../utils/haptics';
 
 interface LicensesModalProps {
   visible: boolean;
@@ -21,8 +23,52 @@ interface LicensesModalProps {
 }
 
 export default function LicensesModal({ visible, onClose }: LicensesModalProps) {
+  // Animation values for back button
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    if (visible) {
+      // Reset and animate in when modal opens
+      backButtonScale.setValue(0.8);
+      backButtonOpacity.setValue(0.3);
+
+      Animated.parallel([
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [visible]);
+
   const openLink = (url: string) => {
     Linking.openURL(url);
+  };
+
+  const handleBackPress = () => {
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      onClose();
+    });
   };
 
   return (
@@ -30,13 +76,23 @@ export default function LicensesModal({ visible, onClose }: LicensesModalProps) 
       visible={visible}
       animationType="slide"
       presentationStyle="pageSheet"
-      onRequestClose={onClose}
+      onRequestClose={handleBackPress}
     >
       <SafeAreaView style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <BackButton onPress={onClose} />
+          <View style={styles.backButtonWrapper}>
+            <Animated.View style={{
+              opacity: backButtonOpacity,
+              transform: [{ scale: backButtonScale }],
+            }}>
+              <BackButton
+                onPress={handleBackPress}
+                color="#c3b1e1"
+                size={72}
+                iconSize={28}
+              />
+            </Animated.View>
           </View>
           <View style={styles.headerCenter}>
             <Text style={styles.title}>Licenses</Text>
@@ -350,7 +406,7 @@ export default function LicensesModal({ visible, onClose }: LicensesModalProps) 
                 </View>
                 <TouchableOpacity 
                   style={styles.linkButton}
-                  onPress={() => openLink('https://github.com/expo/expo/blob/main/packages/expo-notifications/LICENSE')}
+                  onPress={() => openLink('https://github.com/expo/expo')}
                 >
                   <Text style={styles.linkText}>View</Text>
                   <Ionicons name="open" size={12} color="#FFFFFF" />
@@ -421,13 +477,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FAFAFA',
     minHeight: 60,
   },
-  headerLeft: {
+  backButtonWrapper: {
     width: 72,
+    marginLeft: -SPACING.lg,
     zIndex: 1,
   },
   headerCenter: {

@@ -251,40 +251,17 @@ export class OnboardingService {
    */
   static async saveUserInterests(userId: string, interestNames: string[]): Promise<{ success: boolean; error?: string }> {
     try {
-      // First, get the interest IDs for the interest names
-      const { data: interests, error: interestsError } = await supabase
-        .from('interests')
-        .select('id, name')
-        .in('name', interestNames);
+      // Save interests directly to the profiles table as a string array
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({
+          interests: interestNames,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', userId);
 
-      if (interestsError) {
-        console.error('Error fetching interests:', interestsError);
-        return { success: false, error: 'Failed to fetch interests' };
-      }
-
-      // Remove existing user interests
-      const { error: deleteError } = await supabase
-        .from('user_interests')
-        .delete()
-        .eq('user_id', userId);
-
-      if (deleteError) {
-        console.error('Error deleting existing interests:', deleteError);
-        return { success: false, error: 'Failed to clear existing interests' };
-      }
-
-      // Insert new user interests
-      const userInterests = interests.map(interest => ({
-        user_id: userId,
-        interest_id: interest.id
-      }));
-
-      const { error: insertError } = await supabase
-        .from('user_interests')
-        .insert(userInterests);
-
-      if (insertError) {
-        console.error('Error inserting user interests:', insertError);
+      if (updateError) {
+        console.error('Error updating user interests:', updateError);
         return { success: false, error: 'Failed to save interests' };
       }
 
@@ -317,7 +294,6 @@ export class OnboardingService {
 
       console.log('✅ Photos uploaded to storage:', uploadResult.urls.length);
 
-      // Photos are now stored in storage buckets only
       console.log('✅ User photos saved to storage buckets:', uploadResult.urls.length);
       return { success: true };
     } catch (error) {

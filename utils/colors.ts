@@ -1,3 +1,13 @@
+import designSystem from '../design-system.json';
+
+const designSystemColors = designSystem?.colors ?? {};
+
+export const DesignSystemColors = {
+  primaryPink: designSystemColors?.primary?.pink ?? '#FF4F81',
+  primaryPurple: designSystemColors?.primary?.purple ?? '#c3b1e1',
+  primaryWhite: designSystemColors?.primary?.white ?? '#FFFFFF',
+};
+
 export const Colors = {
   // Primary Colors - 70% Pink, 30% Purple
   primary: {
@@ -95,4 +105,19 @@ export const ColorTransitions = {
   pinkToPurple: ['#EC4899', '#D8B4FE', '#A855F7'],
   purpleToPink: ['#A855F7', '#F472B6', '#EC4899'],
   warmToCool: ['#F9A8D4', '#C084FC', '#7C3AED'],
+};
+
+const blendPinkPurple = '#E180B1';
+
+export const GradientConfigs = {
+  phaseOneProgress: {
+    colors: [
+      DesignSystemColors.primaryPink,
+      DesignSystemColors.primaryPink,
+      blendPinkPurple,
+      DesignSystemColors.primaryPurple,
+      DesignSystemColors.primaryPurple,
+    ],
+    locations: [0, 0.45, 0.5, 0.55, 1],
+  },
 };

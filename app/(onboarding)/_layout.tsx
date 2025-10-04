@@ -19,12 +19,12 @@ export default function OnboardingLayout() {
       <Stack.Screen name="email-verification" />
       <Stack.Screen name="email-code" />
       <Stack.Screen name="password-creation" />
-      <Stack.Screen name="legal-agreements" />
       
       {/* Phase 2: Identity basics */}
       <Stack.Screen name="mascot-phase2" />
       <Stack.Screen name="basic-details" />
       <Stack.Screen name="gender-selection" />
+      <Stack.Screen name="bio" />
       <Stack.Screen name="photo-upload" />
       
       {/* Phase 3: Match foundation */}
@@ -34,14 +34,14 @@ export default function OnboardingLayout() {
       <Stack.Screen name="debs-preferences" />
       
       {/* Phase 4: Personality & depth */}
-      <Stack.Screen name="bio" />
       <Stack.Screen name="interests" />
       <Stack.Screen name="profile-prompts" />
       
       {/* Phase 5: Engagement hooks */}
       <Stack.Screen name="notifications" />
       <Stack.Screen name="dating-intentions" />
-      
+      <Stack.Screen name="legal-agreements" />
+
       {/* Phase 6: Final setup */}
       <Stack.Screen name="community-guidelines" />
     </Stack>

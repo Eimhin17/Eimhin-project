@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // Replace these with your actual Supabase project credentials
 const supabaseUrl = 'https://tagjfsxeutihwntpudsk.supabase.co';
@@ -6,6 +7,8 @@ const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYm
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
+    // Use AsyncStorage for React Native session persistence
+    storage: AsyncStorage,
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: true,
@@ -74,6 +77,8 @@ export interface Database {
           status: UserStatusType;
           onboarding_completed: boolean;
           profile_completed: boolean;
+          pfp_url?: string;
+          interests?: string[];
           last_active: string;
           created_at: string;
           updated_at: string;
@@ -101,6 +106,8 @@ export interface Database {
           status?: UserStatusType;
           onboarding_completed?: boolean;
           profile_completed?: boolean;
+          pfp_url?: string;
+          interests?: string[];
           last_active?: string;
           created_at?: string;
           updated_at?: string;
@@ -128,6 +135,8 @@ export interface Database {
           status?: UserStatusType;
           onboarding_completed?: boolean;
           profile_completed?: boolean;
+          pfp_url?: string;
+          interests?: string[];
           last_active?: string;
           created_at?: string;
           updated_at?: string;

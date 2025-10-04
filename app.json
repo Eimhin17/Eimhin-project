@@ -3,8 +3,9 @@
     "name": "DebsMatch",
     "slug": "debsmatch",
     "scheme": "debsmatch",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "orientation": "portrait",
+    "icon": "./icon.png",
     "userInterfaceStyle": "dark",
     "splash": {
       "resizeMode": "contain",
@@ -15,16 +16,48 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.anonymous.debsmatch"
+      "bundleIdentifier": "com.anonymous.debsmatch",
+      "buildNumber": "8",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "DebsMatch needs access to your photo library to let you add and manage profile photos, and attach screenshots as report evidence.",
+        "NSPhotoLibraryAddUsageDescription": "DebsMatch may save edited or processed photos to your library when you choose to do so.",
+        "NSCameraUsageDescription": "DebsMatch needs camera access if you choose to take a new photo."
+      }
     },
     "android": {
       "adaptiveIcon": {
+        "foregroundImage": "./icon.png",
         "backgroundColor": "#1a1a1a"
-      }
+      },
+      "package": "com.anonymous.debsmatch",
+      "versionCode": 2,
+      "googleServicesFile": "./google-services.json"
     },
     "plugins": [
       "expo-router",
-      "expo-font"
-    ]
+      "expo-font",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "DebsMatch needs access to your photo library to let you add and manage profile photos, and attach screenshots as report evidence.",
+          "cameraPermission": "DebsMatch needs camera access if you choose to take a new photo."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./icon.png",
+          "color": "#FF4F81",
+          "sounds": []
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "962a3bbd-6584-4e49-b106-ce74047aa7cd"
+      },
+      "router": {}
+    },
+    "owner": "eimhin"
   }
 }

@@ -1,8 +1,13 @@
 import React from 'react';
-import { View, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
-import { FontAwesome5 } from '@expo/vector-icons';
+import { View, StyleSheet, Dimensions, Animated } from 'react-native';
 import { router, usePathname } from 'expo-router';
 import { useCustomFonts } from '../utils/fonts';
+import TabBounceAnimation from './animations/TabBounceAnimation';
+import { playTabSelectionHaptic } from '../utils/haptics';
+import { supabase } from '../lib/supabase';
+import { LikesService } from '../services/likes';
+import { ActivityBadges } from '../utils/activityBadges';
+import { useMatchNotification } from '../contexts/MatchNotificationContext';
 
 const { width } = Dimensions.get('window');
 
@@ -13,6 +18,111 @@ interface NavigationFooterProps {
 export default function NavigationFooter({}: NavigationFooterProps) {
   const pathname = usePathname();
   const fontsLoaded = useCustomFonts();
+  const { showMatchNotification, matchOverlayOpacity } = useMatchNotification();
+
+  const [likesBadge, setLikesBadge] = React.useState(0);
+  const [chatsBadge, setChatsBadge] = React.useState(0);
+
+  // Compute likes badge based on last seen timestamp
+  const updateLikesBadge = React.useCallback(async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return setLikesBadge(0);
+
+      const [lastSeen, likes] = await Promise.all([
+        ActivityBadges.getLastSeenLikesAt(),
+        LikesService.getLikesReceived(user.id),
+      ]);
+
+      if (!likes || likes.length === 0) return setLikesBadge(0);
+
+      if (!lastSeen) {
+        // If user has never visited, show total likes as unseen
+        setLikesBadge(likes.length);
+        return;
+      }
+
+      const unseen = likes.filter(l => new Date(l.created_at) > new Date(lastSeen)).length;
+      setLikesBadge(unseen);
+    } catch (e) {
+      console.warn('⚠️ Failed to update likes badge', e);
+      setLikesBadge(0);
+    }
+  }, []);
+
+  // Compute chats badge based on last seen timestamp
+  const updateChatsBadge = React.useCallback(async () => {
+    try {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return setChatsBadge(0);
+
+      const lastSeen = await ActivityBadges.getLastSeenChatsAt();
+
+      // Get matches to limit messages to this user's conversations
+      const { data: matches, error: matchesError } = await supabase
+        .from('matches')
+        .select('id, user1_id, user2_id')
+        .or(`user1_id.eq.${user.id},user2_id.eq.${user.id}`);
+
+      if (matchesError || !matches || matches.length === 0) {
+        setChatsBadge(0);
+        return;
+      }
+
+      const matchIds = matches.map(m => m.id);
+
+      // Count new messages since last seen from other users
+      const messagesQuery = supabase
+        .from('messages')
+        .select('*', { count: 'exact', head: true })
+        .in('match_id', matchIds)
+        .neq('sender_id', user.id);
+
+      if (lastSeen) {
+        messagesQuery.gt('created_at', lastSeen);
+      }
+
+      const { count, error: messagesError } = await messagesQuery;
+      if (messagesError) {
+        console.warn('⚠️ Failed to count new messages', messagesError);
+        setChatsBadge(0);
+        return;
+      }
+
+      setChatsBadge(count || 0);
+    } catch (e) {
+      console.warn('⚠️ Failed to update chats badge', e);
+      setChatsBadge(0);
+    }
+  }, []);
+
+  // Recompute badges when path changes and on mount
+  React.useEffect(() => {
+    // Mark sections as seen when visiting respective tabs
+    const markSeenIfVisited = async () => {
+      if (pathname === '/likes') {
+        await ActivityBadges.setLastSeenLikesNow();
+      }
+      if (pathname === '/chats') {
+        await ActivityBadges.setLastSeenChatsNow();
+      }
+    };
+
+    markSeenIfVisited().finally(() => {
+      // After marking seen, update badges
+      updateLikesBadge();
+      updateChatsBadge();
+    });
+  }, [pathname, updateLikesBadge, updateChatsBadge]);
+
+  // Also refresh periodically (lightweight) to catch background changes
+  React.useEffect(() => {
+    const id = setInterval(() => {
+      updateLikesBadge();
+      updateChatsBadge();
+    }, 15000);
+    return () => clearInterval(id);
+  }, [updateLikesBadge, updateChatsBadge]);
 
   const navigationItems = [
     {
@@ -42,6 +152,7 @@ export default function NavigationFooter({}: NavigationFooterProps) {
   ];
 
   const handleNavigation = (route: string) => {
+    playTabSelectionHaptic();
     router.push(route);
   };
 
@@ -52,25 +163,25 @@ export default function NavigationFooter({}: NavigationFooterProps) {
   return (
     <View style={styles.container}>
       {navigationItems.map((item) => (
-        <TouchableOpacity
+        <TabBounceAnimation
           key={item.id}
-          style={styles.navItem}
+          icon={item.icon}
+          isActive={item.isActive}
           onPress={() => handleNavigation(item.route)}
-          activeOpacity={0.7}
-        >
-          <View style={[
-            styles.iconContainer,
-            item.isActive && styles.activeIconContainer
-          ]}>
-            <FontAwesome5 
-              name={item.icon as any} 
-              size={24} 
-              color={item.isActive ? '#FF4F81' : '#c3b1e1'} 
-              solid={item.isActive}
-            />
-          </View>
-        </TouchableOpacity>
+          style={styles.navItem}
+          badgeCount={item.id === 'likes' ? likesBadge : item.id === 'chats' ? chatsBadge : 0}
+        />
       ))}
+
+      {/* Overlay for match notification */}
+      {showMatchNotification && (
+        <Animated.View style={[
+          styles.overlay,
+          { opacity: matchOverlayOpacity }
+        ]}
+        pointerEvents="none"
+        />
+      )}
     </View>
   );
 }
@@ -79,8 +190,8 @@ const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     backgroundColor: '#FFFFFF',
-    borderTopWidth: 1,
-    borderTopColor: '#E5E7EB', // Using design system border color
+    // Remove top border to eliminate visible break line
+    borderTopWidth: 0,
     paddingHorizontal: 16, // Reduced padding
     paddingVertical: 8, // Much smaller vertical padding
     paddingBottom: 20, // Reduced safe area padding
@@ -89,25 +200,21 @@ const styles = StyleSheet.create({
       width: 0,
       height: -1,
     },
-    shadowOpacity: 0.05,
-    shadowRadius: 2,
-    elevation: 4,
+    // Disable shadow/elevation so the footer blends seamlessly
+    shadowOpacity: 0,
+    shadowRadius: 0,
+    elevation: 0,
   },
   navItem: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
     paddingVertical: 4, // Reduced padding
   },
-  iconContainer: {
-    width: 40, // Smaller icon container
-    height: 40, // Smaller icon container
-    borderRadius: 20, // Smaller border radius
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'transparent',
-  },
-  activeIconContainer: {
-    // No background - just filled pink icon
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    zIndex: 10,
   },
 });

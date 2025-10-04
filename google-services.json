@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "739078859509",
+    "project_id": "debsmatch-71a35",
+    "storage_bucket": "debsmatch-71a35.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:739078859509:android:6197244cb92249015873bc",
+        "android_client_info": {
+          "package_name": "com.anonymous.debsmatch"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCu1EbIwGD7JDaBtsh-jb9MHbz96gh7Eos"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, StyleSheet, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
+import { LinearGradient } from 'expo-linear-gradient';
 import { ProfilePictureService } from '../services/profilePicture';
 import { convertFileUriToDataUrl } from '../utils/imageUtils';
-import { PhotoUploadService } from '../services/photoUpload';
-import { supabase } from '../lib/supabase';
 
 interface CircularProfilePictureProps {
   userId: string;
@@ -15,7 +14,7 @@ interface CircularProfilePictureProps {
 
 /**
  * Circular Profile Picture Component
- * Automatically fetches and displays a user's circular profile picture
+ * Automatically fetches and displays a user's circular profile picture with caching
  * Falls back to a placeholder if no PFP is available
  */
 export const CircularProfilePicture: React.FC<CircularProfilePictureProps> = ({
@@ -27,74 +26,57 @@ export const CircularProfilePicture: React.FC<CircularProfilePictureProps> = ({
   const [pfpUrl, setPfpUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
+  const isMounted = useRef(true);
 
   useEffect(() => {
+    isMounted.current = true;
     loadProfilePicture();
+
+    return () => {
+      isMounted.current = false;
+    };
   }, [userId]);
 
   const loadProfilePicture = async () => {
     try {
+      if (!isMounted.current) return;
+
       setLoading(true);
       setError(false);
-      
+
+      // ProfilePictureService.getPFP now uses caching internally
       const url = await ProfilePictureService.getPFP(userId);
-      
+
+      if (!isMounted.current) return;
+
       // Validate the URL - if it's invalid or a test URL, treat as error
       if (!url || url.includes('example.com') || url.includes('test.jpg')) {
-        console.log('⚠️ Invalid PFP URL, falling back to user initial');
         setError(true);
+        setLoading(false);
         return;
       }
-      
-      // For storage URLs, refresh signed URL if needed
+
+      // For local file URIs, convert to data URL
       if (url.startsWith('file://')) {
         const convertedUrl = await convertFileUriToDataUrl(url);
-        setPfpUrl(convertedUrl);
-      } else if (url.includes('supabase.co')) {
-        // Storage URL - check if it's a PFP URL and refresh accordingly
-        try {
-          let refreshResult;
-          if (url.includes('user-pfps')) {
-            // This is a PFP URL - use ProfilePictureService logic
-            const urlParts = url.split('/');
-            const fileName = urlParts[urlParts.length - 1];
-            const username = urlParts[urlParts.length - 2];
-            const filePath = `${username}/${fileName}`;
-            
-            const { data: signedUrlData, error: signedUrlError } = await supabase.storage
-              .from('user-pfps')
-              .createSignedUrl(filePath, 3600);
-              
-            if (signedUrlError) {
-              console.log('⚠️ PFP file not found in storage, using original URL as fallback');
-              setPfpUrl(url);
-            } else {
-              setPfpUrl(signedUrlData.signedUrl);
-            }
-          } else {
-            // This is a regular photo URL - use PhotoUploadService
-            refreshResult = await PhotoUploadService.getSignedUrl(url);
-            if (refreshResult.success && refreshResult.url) {
-              setPfpUrl(refreshResult.url);
-            } else {
-              // Fallback to original URL
-              setPfpUrl(url);
-            }
-          }
-        } catch (error) {
-          console.error('❌ Error refreshing PFP signed URL:', error);
-          // Fallback to original URL
-          setPfpUrl(url);
+        if (isMounted.current) {
+          setPfpUrl(convertedUrl);
         }
       } else {
-        // Other URL types - use directly
-        setPfpUrl(url);
+        // For Supabase storage URLs (already signed and cached by getPFP), use directly
+        if (isMounted.current) {
+          setPfpUrl(url);
+        }
       }
     } catch (err) {
-      console.error('Error loading profile picture:', err);
-      setError(true);
+      if (isMounted.current) {
+        console.error('Error loading profile picture:', err);
+        setError(true);
+      }
     } finally {
-      setLoading(false);
+      if (isMounted.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -122,14 +104,19 @@ export const CircularProfilePicture: React.FC<CircularProfilePictureProps> = ({
 
   if (error || !pfpUrl) {
     return (
-      <View style={[containerStyle, styles.placeholder]}>
+      <LinearGradient
+        colors={['#F8F4FF', '#E8DBFF', '#D8C4FF']}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[containerStyle, styles.placeholder]}
+      >
         {fallbackIcon || (
           <View style={styles.defaultIcon}>
             {/* You can replace this with any icon component */}
             <View style={[styles.iconCircle, { width: size * 0.6, height: size * 0.6, borderRadius: (size * 0.6) / 2 }]} />
           </View>
         )}
-      </View>
+      </LinearGradient>
     );
   }
 
@@ -139,6 +126,9 @@ export const CircularProfilePicture: React.FC<CircularProfilePictureProps> = ({
       style={containerStyle}
       contentFit="cover"
       onError={() => setError(true)}
+      cachePolicy="memory-disk"
+      priority="high"
+      transition={200}
     />
   );
 };
@@ -151,7 +141,8 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   placeholder: {
-    backgroundColor: '#E0E0E0',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   loader: {
     position: 'absolute',

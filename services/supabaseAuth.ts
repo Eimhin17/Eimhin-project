@@ -467,7 +467,8 @@ export class SupabaseAuthService {
       console.log('🔐 Sending password reset email to:', email);
 
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: 'debsmatch://reset-password',
+        // Use native app deep link (TestFlight build), not Expo dev URL
+        redirectTo: 'debsmatch://auth/reset-password',
       });
 
       if (error) {

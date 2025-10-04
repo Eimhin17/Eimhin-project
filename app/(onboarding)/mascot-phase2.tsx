@@ -1,39 +1,52 @@
 import React, { useRef, useEffect } from 'react';
-import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  SafeAreaView, 
-  TouchableOpacity, 
+import {
+  View,
+  Text,
+  StyleSheet,
+  SafeAreaView,
+  TouchableOpacity,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
   Animated,
-  Dimensions
+  Dimensions,
+  Easing
 } from 'react-native';
 import { router } from 'expo-router';
-import { LinearGradient } from 'expo-linear-gradient';
 import { Image } from 'expo-image';
-import { SPACING, BORDER_RADIUS } from '../../utils/constants';
+import { LinearGradient } from 'expo-linear-gradient';
+import { SPACING } from '../../utils/constants';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
 import { Fonts } from '../../utils/fonts';
+import { safeGoBack } from '../../utils/safeNavigation';
+import { playOnboardingProgressHaptic, playLightHaptic } from '../../utils/haptics';
 import { BackButton } from '../../components/ui';
 
 const { width, height } = Dimensions.get('window');
 
 export default function MascotPhase2Screen() {
+  const { setCurrentStep } = useOnboarding();
   // Animation values
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const buttonOpacity = useRef(new Animated.Value(0)).current;
-  const progressFillAnim = useRef(new Animated.Value(0)).current;
+  const TOTAL_PHASES = 4;
+  const CURRENT_PHASE = 2;
   
   // Button press animations
   const buttonScale = useRef(new Animated.Value(1)).current;
-  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
+
+  // Register this step for resume functionality
+  useEffect(() => {
+    setCurrentStep(ONBOARDING_STEPS.MASCOT_PHASE2);
+  }, []);
 
   useEffect(() => {
-    // Staggered entrance animations
+    // Staggered entrance animations including back button fade + scale
     Animated.sequence([
       Animated.parallel([
         Animated.timing(fadeAnim, {
@@ -44,6 +57,17 @@ export default function MascotPhase2Screen() {
         Animated.timing(slideAnim, {
           toValue: 0,
           duration: 600,
+          useNativeDriver: true,
+        }),
+        // Back button fade + scale combo animation
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]),
@@ -78,15 +102,44 @@ export default function MascotPhase2Screen() {
     });
   };
 
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  };
+
   const handleContinue = () => {
+    playLightHaptic();
+    triggerButtonSweep();
     animateButtonPress(buttonScale, () => {
-      router.push('/(onboarding)/basic-details');
+      playOnboardingProgressHaptic(CURRENT_PHASE, TOTAL_PHASES);
+      setTimeout(() => {
+        router.push('/(onboarding)/basic-details');
+      }, 200);
     });
   };
 
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.MASCOT_PHASE2);
     });
   };
 
@@ -106,19 +159,23 @@ export default function MascotPhase2Screen() {
           {/* Header */}
           <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
             <View style={styles.backButtonContainer}>
-              <BackButton
-                onPress={handleBackPress}
-                animatedValue={backButtonScale}
-                color="#c3b1e1"
-                size={72}
-                iconSize={28}
-              />
+              <Animated.View style={{
+                opacity: backButtonOpacity,
+                transform: [{ scale: backButtonScale }],
+              }}>
+                <BackButton
+                  onPress={handleBackPress}
+                  color="#c3b1e1"
+                  size={72}
+                  iconSize={28}
+                />
+              </Animated.View>
             </View>
             
             <View style={styles.headerCenter}>
               <View style={styles.progressContainer}>
                 <Text style={styles.progressText}>Phase 2</Text>
-                <Text style={styles.progressSubtext}>Profile setup</Text>
+                <Text style={styles.progressSubtext}>Profile Setup</Text>
               </View>
             </View>
             
@@ -146,6 +203,33 @@ export default function MascotPhase2Screen() {
                 onPress={handleContinue}
                 activeOpacity={0.8}
               >
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.buttonHighlight,
+                    {
+                      opacity: buttonHighlightAnim.interpolate({
+                        inputRange: [0, 0.2, 0.8, 1],
+                        outputRange: [0, 0.45, 0.25, 0],
+                      }),
+                      transform: [
+                        {
+                          translateX: buttonHighlightAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [-220, 220],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                >
+                  <LinearGradient
+                    colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.buttonHighlightGradient}
+                  />
+                </Animated.View>
                 <Text style={styles.continueButtonText}>
                   Continue
                 </Text>
@@ -200,17 +284,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   progressText: {
-    fontSize: 24, // Much larger for main title
-    fontWeight: '600', // SemiBold weight for prominence
-    color: '#1B1B3A', // Primary text color from design system
-    fontFamily: Fonts.semiBold, // Poppins SemiBold from design system
+    fontSize: 24,
+    fontWeight: '600',
+    color: '#1B1B3A',
+    fontFamily: Fonts.semiBold,
   },
   progressSubtext: {
-    fontSize: 18, // Larger for subtitle
-    fontWeight: '400', // Regular weight for subtitle
-    color: '#6B7280', // Secondary text color from design system
-    fontFamily: Fonts.regular, // Poppins Regular from design system
-    marginTop: 4, // Increased spacing between lines
+    fontSize: 18,
+    fontWeight: '400',
+    color: '#6B7280',
+    fontFamily: Fonts.regular,
+    marginTop: 4,
   },
   headerRight: {
     width: 72, // Same size as back button for balance
@@ -240,11 +324,10 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     position: 'absolute',
-    bottom: 0,
+    bottom: SPACING.lg,
     left: 0,
     right: 0,
-    paddingHorizontal: 32, // xl spacing from design system (matches first mascot)
-    paddingBottom: 48, // 2xl spacing from design system (matches first mascot)
+    paddingHorizontal: SPACING.xl, // xl spacing from design system (matches basic-details)
     backgroundColor: 'transparent',
   },
   buttonWrapper: {
@@ -258,6 +341,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 56, // From design system primary button spec
+    overflow: 'hidden',
     ...Platform.select({
       ios: {
         shadowColor: '#FF4F81',
@@ -270,6 +354,16 @@ const styles = StyleSheet.create({
         shadowColor: '#FF4F81',
       },
     }),
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
   continueButtonText: {
     fontFamily: Fonts.semiBold, // Poppins SemiBold from design system

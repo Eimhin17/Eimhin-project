@@ -1,4 +1,4 @@
-import React, { useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   View, 
   Text, 
@@ -17,6 +17,10 @@ import { Image } from 'expo-image';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
 import { BackButton } from '../../components/ui';
+import { attachProgressHaptics, playLightHaptic, playOnboardingProgressHaptic } from '../../utils/haptics';
+import { useOnboarding, ONBOARDING_STEPS } from '../../OnboardingContext';
+import { safeGoBack } from '../../utils/safeNavigation';
+import { Easing } from 'react-native';
 
 const { width, height } = Dimensions.get('window');
 
@@ -27,13 +31,22 @@ export default function MascotPhase3Screen() {
   const contentOpacity = useRef(new Animated.Value(0)).current;
   const buttonOpacity = useRef(new Animated.Value(0)).current;
   const progressFillAnim = useRef(new Animated.Value(0)).current;
-  
+
   // Button press animations
   const buttonScale = useRef(new Animated.Value(1)).current;
-  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const buttonHighlightAnim = useRef(new Animated.Value(0)).current;
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+
+  // Animation states
+  const [isProgressAnimating, setIsProgressAnimating] = useState(false);
+
+  const TOTAL_STEPS = 5;
+  const CURRENT_STEP = 3;
+  const PREVIOUS_STEP = 2;
 
   useEffect(() => {
-    // Staggered entrance animations
+    // Staggered entrance animations including back button fade + scale
     Animated.sequence([
       Animated.parallel([
         Animated.timing(fadeAnim, {
@@ -44,6 +57,17 @@ export default function MascotPhase3Screen() {
         Animated.timing(slideAnim, {
           toValue: 0,
           duration: 600,
+          useNativeDriver: true,
+        }),
+        // Back button fade + scale combo animation
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
           useNativeDriver: true,
         }),
       ]),
@@ -78,15 +102,60 @@ export default function MascotPhase3Screen() {
     });
   };
 
-  const handleContinue = () => {
-    animateButtonPress(buttonScale, () => {
+  const triggerButtonSweep = () => {
+    buttonHighlightAnim.stopAnimation();
+    buttonHighlightAnim.setValue(0);
+    Animated.timing(buttonHighlightAnim, {
+      toValue: 1,
+      duration: 750,
+      easing: Easing.out(Easing.quad),
+      useNativeDriver: true,
+    }).start();
+  };
+
+  const animateProgressAndContinue = () => {
+    if (isProgressAnimating) {
+      return;
+    }
+
+    progressFillAnim.setValue(0);
+    setIsProgressAnimating(true);
+    const detachHaptics = attachProgressHaptics(progressFillAnim);
+
+    Animated.timing(progressFillAnim, {
+      toValue: 1,
+      duration: 1000,
+      useNativeDriver: false,
+    }).start(() => {
+      detachHaptics();
+      setIsProgressAnimating(false);
+      playOnboardingProgressHaptic(CURRENT_STEP, TOTAL_STEPS);
       router.push('/(onboarding)/looking-for');
     });
   };
 
+  const handleContinue = () => {
+    playLightHaptic();
+    triggerButtonSweep();
+    animateButtonPress(buttonScale, animateProgressAndContinue);
+  };
+
   const handleBackPress = () => {
-    animateButtonPress(backButtonScale, () => {
-      router.back();
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      safeGoBack(ONBOARDING_STEPS.MASCOT_PHASE3);
     });
   };
 
@@ -106,13 +175,17 @@ export default function MascotPhase3Screen() {
           {/* Header */}
           <Animated.View style={[styles.header, { opacity: fadeAnim }]}>
             <View style={styles.backButtonContainer}>
-              <BackButton
-                onPress={handleBackPress}
-                animatedValue={backButtonScale}
-                color="#c3b1e1"
-                size={72}
-                iconSize={28}
-              />
+              <Animated.View style={{
+                opacity: backButtonOpacity,
+                transform: [{ scale: backButtonScale }],
+              }}>
+                <BackButton
+                  onPress={handleBackPress}
+                  color="#c3b1e1"
+                  size={72}
+                  iconSize={28}
+                />
+              </Animated.View>
             </View>
             
             <View style={styles.headerCenter}>
@@ -146,6 +219,33 @@ export default function MascotPhase3Screen() {
                 onPress={handleContinue}
                 activeOpacity={0.8}
               >
+                <Animated.View
+                  pointerEvents="none"
+                  style={[
+                    styles.buttonHighlight,
+                    {
+                      opacity: buttonHighlightAnim.interpolate({
+                        inputRange: [0, 0.2, 0.8, 1],
+                        outputRange: [0, 0.45, 0.25, 0],
+                      }),
+                      transform: [
+                        {
+                          translateX: buttonHighlightAnim.interpolate({
+                            inputRange: [0, 1],
+                            outputRange: [-220, 220],
+                          }),
+                        },
+                      ],
+                    },
+                  ]}
+                >
+                  <LinearGradient
+                    colors={['rgba(255,255,255,0)', 'rgba(255,255,255,0.6)', 'rgba(255,255,255,0)']}
+                    start={{ x: 0, y: 0.5 }}
+                    end={{ x: 1, y: 0.5 }}
+                    style={styles.buttonHighlightGradient}
+                  />
+                </Animated.View>
                 <Text style={styles.continueButtonText}>
                   Continue
                 </Text>
@@ -241,11 +341,10 @@ const styles = StyleSheet.create({
   },
   buttonContainer: {
     position: 'absolute',
-    bottom: 0,
+    bottom: SPACING.lg,
     left: 0,
     right: 0,
-    paddingHorizontal: 32, // xl spacing from design system (matches first mascot)
-    paddingBottom: 48, // 2xl spacing from design system (matches first mascot)
+    paddingHorizontal: SPACING.xl,
     backgroundColor: 'transparent',
   },
   buttonWrapper: {
@@ -278,6 +377,16 @@ const styles = StyleSheet.create({
     fontSize: 18, // From design system primary button spec
     color: '#FFFFFF', // White text from design system
     letterSpacing: 0.5, // From design system primary button spec
+  },
+  buttonHighlight: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 180,
+  },
+  buttonHighlightGradient: {
+    flex: 1,
+    borderRadius: 16,
   },
 });
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   SafeAreaView,
   Switch,
   Alert,
+  Animated,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -16,6 +17,7 @@ import { SPACING, BORDER_RADIUS } from '../utils/constants';
 import { Fonts } from '../utils/fonts';
 import { BackButton } from './ui';
 import { useUser } from '../contexts/UserContext';
+import { playLightHaptic } from '../utils/haptics';
 
 interface PrivacyPreferencesModalProps {
   visible: boolean;
@@ -24,7 +26,11 @@ interface PrivacyPreferencesModalProps {
 
 export default function PrivacyPreferencesModal({ visible, onClose }: PrivacyPreferencesModalProps) {
   const { userProfile, updateUserProfile } = useUser();
-  
+
+  // Animation values for back button
+  const backButtonScale = useRef(new Animated.Value(0.8)).current;
+  const backButtonOpacity = useRef(new Animated.Value(0.3)).current;
+
   // Privacy settings state
   const [profileVisibility, setProfileVisibility] = useState('public');
   const [showAge, setShowAge] = useState(true);
@@ -34,6 +40,27 @@ export default function PrivacyPreferencesModal({ visible, onClose }: PrivacyPre
   const [showOnlineStatus, setShowOnlineStatus] = useState(true);
   const [dataAnalytics, setDataAnalytics] = useState(true);
   const [marketingEmails, setMarketingEmails] = useState(false);
+
+  useEffect(() => {
+    if (visible) {
+      // Reset and animate in when modal opens
+      backButtonScale.setValue(0.8);
+      backButtonOpacity.setValue(0.3);
+
+      Animated.parallel([
+        Animated.timing(backButtonOpacity, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+        Animated.timing(backButtonScale, {
+          toValue: 1,
+          duration: 250,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [visible]);
 
   // Load current privacy settings
   useEffect(() => {
@@ -81,18 +108,47 @@ export default function PrivacyPreferencesModal({ visible, onClose }: PrivacyPre
     setProfileVisibility(value);
   };
 
+  const handleBackPress = () => {
+    playLightHaptic();
+    // Animate back with fade + scale combo
+    Animated.parallel([
+      Animated.timing(backButtonOpacity, {
+        toValue: 0.3,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+      Animated.timing(backButtonScale, {
+        toValue: 0.8,
+        duration: 100,
+        useNativeDriver: true,
+      }),
+    ]).start(() => {
+      onClose();
+    });
+  };
+
   return (
     <Modal
       visible={visible}
       animationType="slide"
       presentationStyle="pageSheet"
-      onRequestClose={onClose}
+      onRequestClose={handleBackPress}
     >
       <SafeAreaView style={styles.container}>
         {/* Header */}
         <View style={styles.header}>
-          <View style={styles.headerLeft}>
-            <BackButton onPress={onClose} />
+          <View style={styles.backButtonWrapper}>
+            <Animated.View style={{
+              opacity: backButtonOpacity,
+              transform: [{ scale: backButtonScale }],
+            }}>
+              <BackButton
+                onPress={handleBackPress}
+                color="#c3b1e1"
+                size={72}
+                iconSize={28}
+              />
+            </Animated.View>
           </View>
           <View style={styles.headerCenter}>
             <Text style={styles.title}>Privacy Pref</Text>
@@ -477,13 +533,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md,
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
-    backgroundColor: '#FFFFFF',
+    backgroundColor: '#FAFAFA',
     minHeight: 60,
   },
-  headerLeft: {
+  backButtonWrapper: {
     width: 72,
+    marginLeft: -SPACING.lg,
     zIndex: 1,
   },
   headerCenter: {

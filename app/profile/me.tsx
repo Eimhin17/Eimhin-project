@@ -7,9 +7,11 @@ import * as Haptics from 'expo-haptics';
 import ScrollableProfileCard, { ProfileData } from '../../components/ScrollableProfileCard';
 import { useUser } from '../../contexts/UserContext';
 import { supabase } from '../../lib/supabase';
+import { PhotoUploadService } from '../../services/photoUpload';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
 import { BackButton } from '../../components/ui';
+import { playLightHaptic } from '../../utils/haptics';
 
 const { width: screenWidth } = Dimensions.get('window');
 const SWIPE_THRESHOLD = screenWidth * 0.25;
@@ -94,6 +96,9 @@ export default function MyProfileViewScreen() {
   const { userProfile } = useUser();
   const [profileData, setProfileData] = useState<ProfileData | null>(null);
   const [loading, setLoading] = useState(true);
+  // Back button animation values (onboarding-style)
+  const backButtonScale = useRef(new Animated.Value(1)).current;
+  const backButtonOpacity = useRef(new Animated.Value(1)).current;
   
   // Swipe animation values
   const translateX = useRef(new Animated.Value(0)).current;
@@ -131,40 +136,13 @@ export default function MyProfileViewScreen() {
     return null;
   };
   
-  // Function to load photos from storage bucket (same as profile preview)
+  // Load photos using the centralized service to ensure consistent index-based ordering
   const loadPhotos = async (profileId: string, username: string) => {
     try {
       console.log('🖼️ Loading photos for user:', username);
-      const { data: files, error } = await supabase.storage
-        .from('user-photos')
-        .list(username, {
-          limit: 100,
-          sortBy: { column: 'created_at', order: 'asc' }
-        });
-
-      if (error) {
-        console.error('❌ Error fetching photos from storage:', error);
-        return [];
-      }
-
-      if (!files || files.length === 0) {
-        console.log('📷 No photos found for user:', username);
-        return [];
-      }
-
-      // Get signed URLs for each photo
-      const photoUrls = await Promise.all(
-        files.map(async (file) => {
-          const { data: signedUrl } = await supabase.storage
-            .from('user-photos')
-            .createSignedUrl(`${username}/${file.name}`, 3600); // 1 hour expiry
-          return signedUrl?.signedUrl || '';
-        })
-      );
-
-      const validUrls = photoUrls.filter(url => url !== '');
-      console.log(`✅ Loaded ${validUrls.length} photos for user:`, username);
-      return validUrls;
+      const urls = await PhotoUploadService.loadPhotos(profileId, username);
+      console.log(`✅ Loaded ${urls.length} photos for user:`, username);
+      return urls;
     } catch (error) {
       console.error('❌ Error loading photos:', error);
       return [];
@@ -315,9 +293,28 @@ export default function MyProfileViewScreen() {
     <SafeAreaView style={styles.container}>
       {/* Header - Same as other pages */}
       <View style={styles.header}>
-        <BackButton onPress={() => router.push('/(tabs)/profile')} />
+        <View style={styles.backButtonWrapper}>
+          <Animated.View style={{ transform: [{ scale: backButtonScale }], opacity: backButtonOpacity }}>
+            <BackButton
+              onPress={() => {
+                playLightHaptic();
+                Animated.parallel([
+                  Animated.timing(backButtonOpacity, { toValue: 0.85, duration: 90, useNativeDriver: true }),
+                  Animated.timing(backButtonScale, { toValue: 0.92, duration: 90, useNativeDriver: true }),
+                ]).start(() => {
+                  Animated.parallel([
+                    Animated.timing(backButtonOpacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+                    Animated.timing(backButtonScale, { toValue: 1, duration: 140, useNativeDriver: true }),
+                  ]).start(() => {
+                    router.push('/(tabs)/profile');
+                  });
+                });
+              }}
+            />
+          </Animated.View>
+        </View>
         
-        <View style={styles.headerCenter}>
+        <View style={styles.headerCenter} pointerEvents="none">
           <Text style={styles.headerTitle}>Profile</Text>
         </View>
         
@@ -395,6 +392,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFFFF',
     minHeight: 60,
     zIndex: 1000,
+  },
+  backButtonWrapper: {
+    zIndex: 2,
+    width: 72,
+    marginLeft: -SPACING.lg,
   },
   headerCenter: {
     flex: 1,

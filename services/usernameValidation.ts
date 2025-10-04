@@ -22,8 +22,8 @@ export class UsernameValidationService {
       return { isValid: false, error: 'Username must be at least 3 characters long' };
     }
 
-    if (trimmedUsername.length > 30) {
-      return { isValid: false, error: 'Username must be no more than 30 characters long' };
+    if (trimmedUsername.length > 15) {
+      return { isValid: false, error: 'Username must be no more than 15 characters long' };
     }
 
     // Allow letters, numbers, underscores, and hyphens

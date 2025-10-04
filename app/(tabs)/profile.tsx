@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity } from 'react-native';
+import React, { useRef } from 'react';
+import { View, Text, StyleSheet, SafeAreaView, TouchableOpacity, Animated } from 'react-native';
 import { FontAwesome5, Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
@@ -7,9 +7,11 @@ import { useUser } from '../../contexts/UserContext';
 import CircularProfilePicture from '../../components/CircularProfilePicture';
 import { ProfileData } from '../../components/ScrollableProfileCard';
 import { useProfilePreloader } from '../../hooks/useProfilePreloader';
+import { useTabPreloader } from '../../hooks/useTabPreloader';
 import { SPACING, BORDER_RADIUS } from '../../utils/constants';
 import { Fonts } from '../../utils/fonts';
 import { Button } from '../../components/ui';
+import { playLightHaptic } from '../../utils/haptics';
 
 // Helper function to transform current user profile to ProfileData format
 const transformCurrentUserToProfileData = (userProfile: any): ProfileData => {
@@ -76,11 +78,71 @@ const transformCurrentUserToProfileData = (userProfile: any): ProfileData => {
 export default function ProfileScreen() {
   const { userProfile } = useUser();
 
+  // Get user's initial for fallback profile picture
+  const userInitial = userProfile?.firstName
+    ? userProfile.firstName.charAt(0).toUpperCase()
+    : userProfile?.username
+    ? userProfile.username.charAt(0).toUpperCase()
+    : 'U';
+
+  // Button animation values
+  const editButtonScale = useRef(new Animated.Value(1)).current;
+  const editButtonOpacity = useRef(new Animated.Value(1)).current;
+  const viewButtonScale = useRef(new Animated.Value(1)).current;
+  const viewButtonOpacity = useRef(new Animated.Value(1)).current;
+  const settingsRotation = useRef(new Animated.Value(0)).current;
+
   // Preload first profile for instant swiping screen
-  useProfilePreloader({ 
-    shouldPreload: true, 
-    pageName: 'profile' 
+  useProfilePreloader({
+    shouldPreload: true,
+    pageName: 'profile'
   });
+
+  // Preload adjacent tab data
+  useTabPreloader({ currentTab: 'profile' });
+
+  // Button press handlers with animation and haptics
+  const handleEditPress = () => {
+    playLightHaptic();
+    Animated.parallel([
+      Animated.timing(editButtonOpacity, { toValue: 0.85, duration: 90, useNativeDriver: true }),
+      Animated.timing(editButtonScale, { toValue: 0.95, duration: 90, useNativeDriver: true }),
+    ]).start(() => {
+      Animated.parallel([
+        Animated.timing(editButtonOpacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+        Animated.timing(editButtonScale, { toValue: 1, duration: 140, useNativeDriver: true }),
+      ]).start(() => {
+        router.push('/edit-profile');
+      });
+    });
+  };
+
+  const handleViewPress = () => {
+    playLightHaptic();
+    Animated.parallel([
+      Animated.timing(viewButtonOpacity, { toValue: 0.85, duration: 90, useNativeDriver: true }),
+      Animated.timing(viewButtonScale, { toValue: 0.95, duration: 90, useNativeDriver: true }),
+    ]).start(() => {
+      Animated.parallel([
+        Animated.timing(viewButtonOpacity, { toValue: 1, duration: 140, useNativeDriver: true }),
+        Animated.timing(viewButtonScale, { toValue: 1, duration: 140, useNativeDriver: true }),
+      ]).start(() => {
+        router.push('/profile/me');
+      });
+    });
+  };
+
+  const handleSettingsPress = () => {
+    playLightHaptic();
+    Animated.timing(settingsRotation, {
+      toValue: 1,
+      duration: 300,
+      useNativeDriver: true,
+    }).start(() => {
+      settingsRotation.setValue(0);
+      router.push('/settings');
+    });
+  };
 
   if (!userProfile) {
     return (
@@ -92,11 +154,20 @@ export default function ProfileScreen() {
               <Text style={styles.headerTitlePurple}>file</Text>
             </View>
           </View>
-          <TouchableOpacity 
+          <TouchableOpacity
             style={styles.settingsButton}
-            onPress={() => router.push('/settings')}
+            onPress={handleSettingsPress}
           >
-            <Ionicons name="settings-outline" size={24} color="#c3b1e1" />
+            <Animated.View style={{
+              transform: [{
+                rotate: settingsRotation.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: ['0deg', '360deg']
+                })
+              }]
+            }}>
+              <Ionicons name="settings-outline" size={24} color="#c3b1e1" />
+            </Animated.View>
           </TouchableOpacity>
         </View>
         <View style={styles.emptyState}>
@@ -117,11 +188,20 @@ export default function ProfileScreen() {
             <Text style={styles.headerTitlePurple}>file</Text>
           </View>
         </View>
-        <TouchableOpacity 
+        <TouchableOpacity
           style={styles.settingsButton}
-          onPress={() => router.push('/settings')}
+          onPress={handleSettingsPress}
         >
-          <Ionicons name="settings-outline" size={24} color="#c3b1e1" />
+          <Animated.View style={{
+            transform: [{
+              rotate: settingsRotation.interpolate({
+                inputRange: [0, 1],
+                outputRange: ['0deg', '360deg']
+              })
+            }]
+          }}>
+            <Ionicons name="settings-outline" size={24} color="#c3b1e1" />
+          </Animated.View>
         </TouchableOpacity>
       </View>
 
@@ -129,62 +209,64 @@ export default function ProfileScreen() {
       <View style={styles.mainContent}>
         {/* Large PFP */}
         <View style={styles.pfpContainer}>
-          <CircularProfilePicture 
-            userId={userProfile.id} 
+          <CircularProfilePicture
+            userId={userProfile.id}
             size={280}
+            fallbackIcon={<Text style={styles.profileInitial}>{userInitial}</Text>}
           />
         </View>
 
         {/* Action Buttons */}
         <View style={styles.buttonContainer}>
-          <TouchableOpacity
-            style={styles.optionButton}
-            onPress={() => router.push('/edit-profile')}
-            activeOpacity={0.7}
-          >
-            <LinearGradient
-              colors={['#FFFFFF', '#FFF0F5']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.optionButtonGradient}
+          <Animated.View style={{ transform: [{ scale: editButtonScale }], opacity: editButtonOpacity }}>
+            <TouchableOpacity
+              style={styles.optionButton}
+              onPress={handleEditPress}
+              activeOpacity={1}
             >
-              <Ionicons 
-                name="create-outline" 
-                size={24} 
-                color="#c3b1e1" 
-                style={styles.optionIcon}
-              />
-              <Text style={styles.optionLabel}>
-                Edit Profile
-              </Text>
-            </LinearGradient>
-          </TouchableOpacity>
+              <LinearGradient
+                colors={['#FFFFFF', '#FFF0F5']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.optionButtonGradient}
+              >
+                <Ionicons
+                  name="create-outline"
+                  size={24}
+                  color="#c3b1e1"
+                  style={styles.optionIcon}
+                />
+                <Text style={styles.optionLabel}>
+                  Edit Profile
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
 
-          <TouchableOpacity
-            style={styles.optionButton}
-            onPress={() => {
-              // Navigate to view own profile
-              router.push('/profile/me');
-            }}
-            activeOpacity={0.7}
-          >
-            <LinearGradient
-              colors={['#FFFFFF', '#FFF0F5']}
-              start={{ x: 0, y: 0 }}
-              end={{ x: 1, y: 1 }}
-              style={styles.optionButtonGradient}
+          <Animated.View style={{ transform: [{ scale: viewButtonScale }], opacity: viewButtonOpacity }}>
+            <TouchableOpacity
+              style={styles.optionButton}
+              onPress={handleViewPress}
+              activeOpacity={1}
             >
-              <Ionicons 
-                name="eye-outline" 
-                size={24} 
-                color="#c3b1e1" 
-                style={styles.optionIcon}
-              />
-              <Text style={styles.optionLabel}>
-                View Profile
-              </Text>
-            </LinearGradient>
-          </TouchableOpacity>
+              <LinearGradient
+                colors={['#FFFFFF', '#FFF0F5']}
+                start={{ x: 0, y: 0 }}
+                end={{ x: 1, y: 1 }}
+                style={styles.optionButtonGradient}
+              >
+                <Ionicons
+                  name="eye-outline"
+                  size={24}
+                  color="#c3b1e1"
+                  style={styles.optionIcon}
+                />
+                <Text style={styles.optionLabel}>
+                  View Profile
+                </Text>
+              </LinearGradient>
+            </TouchableOpacity>
+          </Animated.View>
         </View>
       </View>
 
@@ -204,8 +286,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: SPACING.lg,
     paddingVertical: SPACING.md, // Match messages page
     backgroundColor: '#FFFFFF',
-    borderBottomWidth: 1,
-    borderBottomColor: '#E5E7EB',
+    borderBottomWidth: 0,
     position: 'relative',
   },
   headerCenter: {
@@ -305,5 +386,10 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     fontFamily: Fonts.regular,
     marginTop: SPACING.lg,
+  },
+  profileInitial: {
+    fontFamily: Fonts.bold,
+    fontSize: 96, // Larger for the bigger profile picture
+    color: '#FF4F81',
   },
 });
